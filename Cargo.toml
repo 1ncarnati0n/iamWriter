@@ -12,3 +12,7 @@ serde_json = "1.0.154"
 [patch.crates-io]
 iced_graphics = { path = "vendor/iced_graphics" }
 winit = { path = "vendor/winit" }
+
+# 의존성 디버그 정보 제거: debug 빌드 용량 감소
+[profile.dev.package."*"]
+debug = false

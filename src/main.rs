@@ -1,49 +1,24 @@
-// iamWriter — 방해 없는 마크다운 글쓰기 도구 (iced)
-// 단축키: ⌘O 열기 · ⌘S 저장 · ⇧⌘S 다른 이름으로 · ⌘, 설정 · ⌘Z / ⇧⌘Z 실행 취소/다시
-//         ⇧⌘F 포커스 · ⇧⌘D 테마 순환
+// iamWriter — 집중 글쓰기 + 영어 공부 (iced)
+// 한 창에 두 모드. ⌘1 집중 글쓰기 · ⌘2 영어 공부. 설계: docs/TYPINGENG_PORT.md
+mod practice;
+mod theme;
+mod writer;
+
 use iced::{
-    advanced::graphics::text::font_system,
-    event, font, keyboard, mouse, system, window,
-    time::{Duration, Instant},
-    widget::{
-        button, column, container, mouse_area, opaque, row, scrollable, slider, space, stack, text,
-        text_editor, text_input, toggler,
-    },
-    Animation, Border, Color, Element, Event, Font, Length, Padding, Subscription, Task,
+    event, keyboard, system, window,
+    widget::{button, container, row, stack, text},
+    Border, Color, Element, Event, Length, Subscription, Task,
 };
-use serde::{Deserialize, Serialize};
-use std::{io::{self, Write}, ops::Range, path::{Path, PathBuf}};
-
-#[cfg(test)]
-mod tests;
-
-const TITLEBAR: f32 = 30.0; // macOS 신호등 버튼 높이만큼
-/// 모든 Mac 에 있는 한글 글꼴. UI 기본 글꼴로 쓰면 한글/영문 기준선과 높이가 섞이지 않는다.
-const UI_FONT: Font = Font::with_name("Apple SD Gothic Neo");
-
-/// 글쓰기용으로 고른 글꼴. 설치된 것만 목록에 뜬다. 검색하면 설치된 모든 글꼴에서 찾는다.
-const CURATED: [(&str, &[&str]); 6] = [
-    ("한글 고정폭", &["D2Coding", "D2Coding ligature", "Monoplex KR", "Monoplex KR Wide", "Sarasa Mono K", "NanumGothicCoding"]),
-    ("한글 명조", &[
-        "MaruBuri", "MaruBuriOTF", "Nanum Myeongjo", "Noto Serif KR", "KoPubWorldBatang_Pro", "RIDIBatang", "Gowun Batang", "AppleMyungjo",
-    ]),
-    ("한글 고딕", &[
-        "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", "Spoqa Han Sans Neo", "Nanum Gothic", "KoPubWorldDotum_Pro",
-    ]),
-    ("고정폭", &[
-        "iA Writer Mono S", "iA Writer Duo S", "SF Mono", "Menlo", "IBM Plex Mono", "JetBrains Mono",
-        "Source Code Pro", "Fira Code", "PT Mono", "Courier Prime",
-    ]),
-    ("세리프", &["iA Writer Quattro S", "New York", "Charter", "Iowan Old Style", "Georgia", "Palatino", "Baskerville", "Hoefler Text"]),
-    ("산세리프", &["Inter", "IBM Plex Sans", "Helvetica Neue", "Avenir Next"]),
-];
+use practice::Practice;
+use theme::{TITLEBAR, UI_FONT};
+use writer::Writer;
 
 fn main() -> iced::Result {
-    iced::application(Writer::boot, Writer::update, Writer::view)
-        .title(Writer::title)
-        .theme(Writer::theme)
+    iced::application(App::boot, App::update, App::view)
+        .title(App::title)
+        .theme(App::theme)
         .default_font(UI_FONT)
-        .subscription(Writer::subscription)
+        .subscription(App::subscription)
         .exit_on_close_request(false) // 닫기 가드를 직접 처리
         .window(window::Settings {
             size: iced::Size::new(1000.0, 760.0),
@@ -58,1053 +33,261 @@ fn main() -> iced::Result {
         .run()
 }
 
-// ───────────────────────── 설정 / 테마 ─────────────────────────
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
-enum Theme { Auto, Light, Sepia, Dark, Night }
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-struct Palette { bg: Color, panel: Color, fg: Color, strong: Color, dim: Color, accent: Color, code: Color }
-
-impl Theme {
-    const ALL: [(Theme, &'static str); 5] = [
-        (Theme::Auto, "자동"), (Theme::Light, "라이트"), (Theme::Sepia, "세피아"), (Theme::Dark, "다크"), (Theme::Night, "나이트"),
-    ];
-
-    fn resolve(self, system_dark: bool) -> Theme {
-        match self {
-            Theme::Auto if system_dark => Theme::Dark,
-            Theme::Auto => Theme::Light,
-            t => t,
-        }
-    }
-
-    fn next(self) -> Self {
-        let i = Self::ALL.iter().position(|(t, _)| *t == self).unwrap_or(0);
-        Self::ALL[(i + 1) % Self::ALL.len()].0
-    }
-
-    fn palette(self) -> Palette {
-        let c = Color::from_rgb8;
-        let g = |v| Color::from_rgb8(v, v, v);
-        match self {
-            Theme::Light | Theme::Auto => Palette { bg: c(247, 247, 245), panel: c(255, 255, 255), fg: g(45), strong: g(0), dim: g(185), accent: c(20, 110, 230), code: c(170, 60, 120) },
-            Theme::Sepia => Palette { bg: c(244, 236, 216), panel: c(250, 244, 230), fg: c(91, 70, 54), strong: c(45, 30, 20), dim: c(195, 175, 145), accent: c(185, 95, 40), code: c(140, 90, 150) },
-            Theme::Dark => Palette { bg: c(26, 26, 28), panel: c(38, 38, 42), fg: g(215), strong: g(250), dim: g(85), accent: c(90, 160, 255), code: c(220, 140, 190) },
-            Theme::Night => Palette { bg: c(10, 12, 18), panel: c(22, 26, 36), fg: c(165, 175, 190), strong: c(230, 235, 245), dim: c(55, 60, 75), accent: c(110, 200, 165), code: c(200, 160, 230) },
-        }
-    }
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mode {
+    /// 집중 글쓰기: 방해 없는 마크다운 편집기
+    Write,
+    /// 영어 공부: 따라치기 + 영작 첨삭 (typingEng)
+    Practice,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
-#[serde(default)]
-struct Settings {
-    font: Option<String>, // 글꼴 패밀리 이름, None = Menlo
-    size: f32,
-    line: f32,
-    measure: u32, // 본문 폭(글자 수)
-    theme: Theme,
-    focus: bool,
+/// 앱 셸: 두 모드의 상태를 들고 메시지를 감싸서 전달만 한다.
+struct App {
+    mode: Mode,
+    writer: Writer,
+    practice: Practice,
 }
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self { font: None, size: 18.0, line: 1.7, measure: 64, theme: Theme::Auto, focus: false }
-    }
-}
-
-fn settings_path() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Application Support/iamWriter/settings.json")
-}
-
-fn load_settings() -> Settings {
-    std::fs::read(settings_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
-}
-
-fn store_settings(s: &Settings) {
-    let p = settings_path();
-    let _ = std::fs::create_dir_all(p.parent().unwrap());
-    let _ = std::fs::write(p, serde_json::to_vec_pretty(s).unwrap()); // 설정 저장 실패는 글을 잃지 않으므로 무시
-}
-
-/// iced(cosmic-text)가 실제로 쓸 수 있는 설치 글꼴 패밀리 이름들.
-/// Font 가 &'static str 이름만 받으므로 시작할 때 한 번 'static 으로 만든다.
-fn font_families() -> Vec<&'static str> {
-    let mut fs = font_system().write().expect("font system");
-    let mut v: Vec<String> = fs.raw().db().faces()
-        .filter_map(|f| f.families.first().map(|(n, _)| n.clone()))
-        .filter(|n| !n.starts_with('.'))
-        .collect();
-    v.sort_by_key(|n| n.to_lowercase());
-    v.dedup();
-    v.into_iter().map(|n| &*Box::leak(n.into_boxed_str())).collect()
-}
-
-/// 이 패밀리가 한글('가')을 직접 갖고 있는지. 실제로 셰이핑해 보고 대체 글꼴이 쓰였는지 본다.
-fn has_hangul(family: &'static str) -> bool {
-    use iced::advanced::graphics::text::cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
-    let weight = Weight(faces_of(family).regular.weight as u16 * 100 + 100);
-    let mut fs = font_system().write().expect("font system");
-    let fs = fs.raw();
-    let mut b = Buffer::new(fs, Metrics::new(16.0, 20.0));
-    b.set_text(fs, "가", &Attrs::new().family(Family::Name(family)).weight(weight), Shaping::Advanced, None);
-    b.shape_until_scroll(fs, false);
-    let Some(id) = b.layout_runs().flat_map(|r| r.glyphs.iter().map(|g| g.font_id)).next() else { return false };
-    fs.db().face(id).is_some_and(|f| f.families.iter().any(|(n, _)| n == family))
-}
-
-/// 본문·굵게·기울임에 쓸 실제 면
-#[derive(Clone, Copy, PartialEq, Debug)]
-struct Faces { regular: Font, bold: Font, italic: Font, bold_italic: Font }
-
-/// 본문은 패밀리 안의 실제 면을 고르고, 굵은 면이 없으면 시스템 Bold를 쓴다.
-/// cosmic-text 는 요청한 굵기(예: 400)의 면이 없으면 패밀리를 통째로 건너뛰고 다른 글꼴로 대체해 버린다
-/// (예: Light/Medium/Bold 만 있는 KoPub 글꼴 → 전부 Apple SD Gothic Neo 로 보임).
-fn faces_of(family: &'static str) -> Faces {
-    use iced::advanced::graphics::text::cosmic_text::fontdb::Style;
-    let mut fs = font_system().write().expect("font system");
-    let faces: Vec<(u16, bool)> = fs.raw().db().faces()
-        .filter(|f| f.families.iter().any(|(n, _)| n == family))
-        .map(|f| (f.weight.0, f.style != Style::Normal))
-        .collect();
-    // 목표 굵기에 가장 가까운 면. 같은 거리면 더 굵은 쪽(CSS 규칙과 같음)
-    let pick = |target: u16, italic: bool| {
-        faces.iter().filter(|(_, it)| *it == italic)
-            .min_by_key(|(w, _)| (w.abs_diff(target), *w < target))
-            .map(|(w, _)| *w)
-    };
-    let weight = |w: u16| match (w + 50) / 100 {
-        0 | 1 => font::Weight::Thin, 2 => font::Weight::ExtraLight, 3 => font::Weight::Light,
-        4 => font::Weight::Normal, 5 => font::Weight::Medium, 6 => font::Weight::Semibold,
-        7 => font::Weight::Bold, 8 => font::Weight::ExtraBold, _ => font::Weight::Black,
-    };
-    let base = Font::with_name(family);
-    let regular = Font { weight: weight(pick(400, false).unwrap_or(400)), ..base };
-    let bold = Font { weight: weight(pick(700, false).unwrap_or(400)), ..base };
-    let bold = if pick(700, false).is_none_or(|w| w < 600 && w <= pick(400, false).unwrap_or(400)) {
-        Font { weight: font::Weight::Bold, ..UI_FONT }
-    } else { bold };
-    // 합성 기울임은 한글 대체 글꼴에도 같은 기울기를 적용한다.
-    let italic = Font { style: font::Style::Oblique, ..regular };
-    let bold_italic = Font { style: font::Style::Oblique, ..bold };
-    Faces { regular, bold, italic, bold_italic }
-}
-
-/// 추천 목록의 한 항목
-#[derive(Clone, Copy)]
-struct FontItem { family: &'static str, label: &'static str, face: Font, hangul: bool }
-
-/// 글꼴에 한국어 이름이 있으면 그걸 보여 준다(예: MaruBuriOTF → 마루 부리OTF)
-fn korean_name(family: &str) -> Option<&'static str> {
-    use iced::advanced::graphics::text::cosmic_text::fontdb::Language;
-    let mut fs = font_system().write().expect("font system");
-    let face = fs.raw().db().faces().find(|f| f.families.iter().any(|(n, _)| n == family))?;
-    let (name, _) = face.families.iter().find(|(n, l)| *l == Language::Korean_Korea && n != family)?;
-    Some(Box::leak(name.clone().into_boxed_str()))
-}
-
-/// (그룹 이름, 항목들) — 설치된 추천 글꼴만
-fn curated_fonts(families: &[&'static str]) -> Vec<(&'static str, Vec<FontItem>)> {
-    CURATED.iter().map(|(group, names)| {
-        let installed = names.iter().filter_map(|n| families.iter().find(|f| *f == n).copied());
-        let items = installed.map(|f| FontItem { family: f, label: korean_name(f).unwrap_or(f), face: faces_of(f).regular, hangul: has_hangul(f) });
-        (*group, items.collect::<Vec<_>>())
-    }).filter(|(_, v)| !v.is_empty()).collect()
-}
-
-// ───────────────────────── 마크다운 강조 ─────────────────────────
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Kind { Plain, Mark, Bold, Italic, BoldItalic, Code }
-
-/// 한 줄 안의 `**굵게**`, `*기울임*`/`_기울임_`, `` `코드` `` 를 잘라 낸다. 닫히지 않은 기호는 그냥 글자.
-fn inline_spans(s: &str) -> Vec<(Range<usize>, Kind)> {
-    let b = s.as_bytes();
-    let mut out = Vec::new();
-    let (mut i, mut plain) = (0, 0);
-    while i < b.len() {
-        if b[i] == b'\\' && b.get(i + 1).is_some_and(u8::is_ascii_punctuation) { i += 2; continue; }
-        let (open, close, kind) = match b[i] {
-            b'`' => (1, "`", Kind::Code),
-            b'*' if b.get(i..i + 3) == Some(b"***") => (3, "***", Kind::BoldItalic),
-            b'*' if b.get(i + 1) == Some(&b'*') => (2, "**", Kind::Bold),
-            b'_' if b.get(i..i + 3) == Some(b"___") => (3, "___", Kind::BoldItalic),
-            b'_' if b.get(i + 1) == Some(&b'_') => (2, "__", Kind::Bold),
-            b'*' => (1, "*", Kind::Italic),
-            b'_' if i == 0 || !b[i - 1].is_ascii_alphanumeric() => (1, "_", Kind::Italic),
-            _ => { i += 1; continue; }
-        };
-        let body = i + open;
-        let found = s[body..].find(close).filter(|&n| n > 0 && !s[body..].starts_with(' '));
-        let Some(n) = found else { i += open; continue };
-        if plain < i { out.push((plain..i, Kind::Plain)); }
-        out.push((i..body, Kind::Mark));
-        out.push((body..body + n, kind));
-        out.push((body + n..body + n + close.len(), Kind::Mark));
-        i = body + n + close.len();
-        plain = i;
-    }
-    if plain < b.len() { out.push((plain..b.len(), Kind::Plain)); }
-    out
-}
-
-/// 줄 앞 기호(제목/인용/목록)의 길이와 종류
-fn line_prefix(line: &str) -> (usize, Option<&'static str>) {
-    let hashes = line.bytes().take_while(|&b| b == b'#').count();
-    if (1..=6).contains(&hashes) && line[hashes..].starts_with(' ') { return (hashes + 1, Some("h")); }
-    if line.starts_with("> ") { return (2, Some("q")); }
-    if ["- ", "* ", "+ "].iter().any(|p| line.starts_with(p)) { return (2, Some("l")); }
-    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
-    if digits > 0 && line[digits..].starts_with(". ") { return (digits + 2, Some("l")); }
-    (0, None)
-}
-
-/// 커서 줄을 포함하는 문단(빈 줄로 구분)의 줄 범위 [start, end]
-fn para_lines(content: &text_editor::Content, at: usize) -> (usize, usize) {
-    let blank = |i| content.line(i).is_none_or(|l| l.text.trim().is_empty());
-    if blank(at) { return (at, at); }
-    let (mut s, mut e) = (at, at);
-    while s > 0 && !blank(s - 1) { s -= 1; }
-    while !blank(e + 1) { e += 1; }
-    (s, e)
-}
-
-/// text_editor 하이라이터 설정. 바뀌면 iced 가 전체를 다시 칠한다.
-#[derive(Clone, PartialEq)]
-struct HlSettings { p: Palette, faces: Faces, focus: Option<(usize, usize)>, found: Option<text_editor::Cursor> }
-
-#[derive(Clone, Copy, Debug)]
-struct Span { color: Color, font: Font }
-
-struct Markdown { s: HlSettings, line: usize }
-
-impl iced::advanced::text::Highlighter for Markdown {
-    type Settings = HlSettings;
-    type Highlight = Span;
-    type Iterator<'a> = std::vec::IntoIter<(Range<usize>, Span)>;
-
-    fn new(s: &HlSettings) -> Self { Self { s: s.clone(), line: 0 } }
-    fn update(&mut self, s: &HlSettings) { self.s = s.clone(); self.line = 0; }
-    fn change_line(&mut self, line: usize) { self.line = line; }
-    fn current_line(&self) -> usize { self.line }
-
-    fn highlight_line(&mut self, line: &str) -> Self::Iterator<'_> {
-        let i = self.line;
-        self.line += 1;
-        let (p, Faces { regular: f, bold, italic, bold_italic }) = (self.s.p, self.s.faces);
-        let span = |r: Range<usize>, color, font| (r, Span { color, font });
-
-        if self.s.focus.is_some_and(|(s, e)| i < s || i > e) {
-            return vec![span(0..line.len(), p.dim, f)].into_iter();
-        }
-        let (n, kind) = line_prefix(line);
-        let mut out = vec![span(0..n, if kind == Some("q") { p.dim } else { p.accent }, f)];
-        if kind == Some("h") {
-            out.push(span(n..line.len(), p.strong, bold));
-        } else {
-        let quote = kind == Some("q");
-        for (r, k) in inline_spans(&line[n..]) {
-            let r = r.start + n..r.end + n;
-            out.push(match k {
-                Kind::Plain => span(r, p.fg, if quote { italic } else { f }),
-                Kind::Mark => span(r, p.dim, f),
-                Kind::Bold => span(r, p.strong, bold),
-                Kind::Italic => span(r, p.fg, italic),
-                Kind::BoldItalic => span(r, p.strong, bold_italic),
-                Kind::Code => span(r, p.code, Font::MONOSPACE),
-            });
-        }
-        }
-        if let Some(found) = self.s.found.filter(|c| c.position.line == i) {
-            let start = found.selection.unwrap().column;
-            let end = found.position.column;
-            out = out.into_iter().flat_map(|(r, style)| {
-                let mut parts = Vec::with_capacity(3);
-                if r.start < start { parts.push((r.start..r.end.min(start), style)); }
-                let overlap = r.start.max(start)..r.end.min(end);
-                if !overlap.is_empty() { parts.push((overlap, Span { color: p.accent, font: bold })); }
-                if r.end > end { parts.push((r.start.max(end)..r.end, style)); }
-                parts
-            }).collect();
-        }
-        out.into_iter()
-    }
-}
-
-// 같은 디렉터리에서 완성한 파일만 교체한다. 심볼릭 링크는 대상 파일을 저장한다.
-fn atomic_save(path: &Path, text: &str) -> io::Result<()> {
-    let target = if path.is_symlink() { std::fs::canonicalize(path)? } else { path.to_path_buf() };
-    let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let metadata = match std::fs::metadata(&target) {
-        Ok(m) if m.is_file() => Some(m),
-        Ok(_) => return Err(io::Error::other("일반 파일만 저장할 수 있습니다")),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
-    if metadata.as_ref().is_some_and(|m| m.permissions().readonly()) {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "읽기 전용 파일입니다"));
-    }
-    for attempt in 0..100 {
-        let temp = parent.join(format!(".iamwriter-{}-{attempt}.tmp", std::process::id()));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
-        let mut file = match options.open(&temp) {
-            Ok(f) => f,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        };
-        let result = (|| {
-            file.write_all(text.as_bytes())?;
-            if let Some(m) = &metadata { file.set_permissions(m.permissions())?; }
-            file.sync_all()?;
-            std::fs::rename(&temp, &target)
-        })();
-        if result.is_err() { let _ = std::fs::remove_file(&temp); }
-        return result;
-    }
-    Err(io::Error::new(io::ErrorKind::AlreadyExists, "임시 저장 파일을 만들 수 없습니다"))
-}
-
-fn search_matches(text: &str, query: &str) -> Vec<text_editor::Cursor> {
-    if query.is_empty() { return Vec::new(); }
-    text.lines().enumerate().flat_map(|(line, text)| {
-        text.match_indices(query).map(move |(column, _)| text_editor::Cursor {
-            position: text_editor::Position { line, column: column + query.len() },
-            selection: Some(text_editor::Position { line, column }),
-        })
-    }).collect()
-}
-
-fn font_matches(family: &str, query: &str) -> bool {
-    family.to_lowercase().contains(query)
-        || (CURATED.iter().any(|(_, names)| names.contains(&family))
-            && korean_name(family).is_some_and(|name| name.to_lowercase().contains(query)))
-}
-
-fn zero_width(font: Font, size: f32) -> f32 {
-    use iced::advanced::text::{self, Paragraph};
-    type P = <iced::Renderer as text::Renderer>::Paragraph;
-    P::with_text(text::Text {
-        content: "0", bounds: iced::Size::INFINITE, size: iced::Pixels(size),
-        line_height: text::LineHeight::default(), font,
-        align_x: text::Alignment::Default, align_y: iced::alignment::Vertical::Top,
-        shaping: text::Shaping::Advanced, wrapping: text::Wrapping::None,
-    }).min_width().max(1.0)
-}
-
-fn position_at(text: &str, offset: usize) -> text_editor::Position {
-    let before = &text[..offset];
-    text_editor::Position {
-        line: before.bytes().filter(|&b| b == b'\n').count(),
-        column: before.rfind('\n').map_or(offset, |i| offset - i - 1),
-    }
-}
-
-fn editor_binding(kp: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
-    use text_editor::{Binding as B, Motion as M};
-    use keyboard::key::Named;
-    if !matches!(kp.status, text_editor::Status::Focused { .. }) { return None; }
-    if kp.modifiers.command() {
-        match kp.key.to_latin(kp.physical_key) {
-            Some('b') => return Some(B::Custom(Message::Format("**"))),
-            Some('i') => return Some(B::Custom(Message::Format("*"))),
-            Some('c' | 'x' | 'v' | 'a') => {},
-            Some(_) => return None,
-            None => {},
-        }
-    }
-    let motion = match kp.key.as_ref() {
-        keyboard::Key::Named(Named::Backspace) if kp.modifiers.macos_command() => Some(M::Home),
-        keyboard::Key::Named(Named::Delete) if kp.modifiers.macos_command() => Some(M::End),
-        keyboard::Key::Named(Named::Backspace) if kp.modifiers.alt() => Some(M::WordLeft),
-        keyboard::Key::Named(Named::Delete) if kp.modifiers.alt() => Some(M::WordRight),
-        _ => None,
-    };
-    if let Some(m) = motion { return Some(B::Custom(Message::DeleteTo(m))); }
-    if kp.modifiers.macos_command() {
-        let motion = match kp.key.as_ref() {
-            keyboard::Key::Named(Named::ArrowUp) => Some(M::DocumentStart),
-            keyboard::Key::Named(Named::ArrowDown) => Some(M::DocumentEnd),
-            _ => None,
-        };
-        if let Some(m) = motion { return Some(if kp.modifiers.shift() { B::Select(m) } else { B::Move(m) }); }
-    }
-    B::from_key_press(kp)
-}
-
-// ───────────────────────── 앱 ─────────────────────────
 
 #[derive(Debug, Clone)]
 enum Message {
-    Edit(text_editor::Action),
-    Shortcut(String, bool), // (키, shift)
-    Escape,
-    Typed,
-    Moved,
-    Tick,
-    ToggleSettings,
-    FontQuery(String),
-    PickFont(Option<String>),
-    Size(f32),
-    Line(f32),
-    Measure(u32),
-    SetTheme(Theme),
-    Focus(bool),
-    Reset,
-    SystemMode(iced::theme::Mode),
-    CloseRequested(window::Id),
-    Drag,
-    Maximize,
-    DismissNotice,
-    FindQuery(String),
-    FindNext(bool),
-    CloseFind,
-    CycleStats,
-    NavigateFocus(bool),
-    DeleteTo(text_editor::Motion),
-    Format(&'static str),
+    Writer(writer::Message),
+    Practice(practice::Msg),
+    Switch(Mode),
 }
 
-struct Writer {
-    path: Option<PathBuf>,
-    content: text_editor::Content,
-    saved: String,
-    dirty: bool,
-    words: usize,
-    chars: usize,
-    undo: Vec<(String, text_editor::Cursor)>,
-    redo: Vec<(String, text_editor::Cursor)>,
-    last_edit: Instant,
-    settings: Settings,
-    faces: Faces, // settings.font 의 실제 면들
-    families: Vec<&'static str>,
-    curated: Vec<(&'static str, Vec<FontItem>)>,
-    font_hangul: bool, // 고른 본문 글꼴이 한글을 직접 갖고 있는지
-    font_query: String,
-    show_settings: bool,
-    system_dark: bool,
-    chrome: Animation<bool>,
-    now: Instant,
-    notice: Option<String>,
-    find_query: String,
-    show_find: bool,
-    matches: Vec<text_editor::Cursor>,
-    match_index: usize,
-    stats: u8,
-    zero_width: f32,
-    edit_group: u8,
-}
-
-fn family_named(families: &[&'static str], name: Option<&str>) -> &'static str {
-    name.and_then(|n| families.iter().find(|f| **f == n).copied()).unwrap_or("Menlo")
-}
-
-impl Writer {
+impl App {
     fn boot() -> (Self, Task<Message>) {
-        Self::with_path(std::env::args().nth(1).map(PathBuf::from))
+        let (writer, task) = Writer::boot();
+        (Self::new(writer), task.map(Message::Writer))
     }
 
-    fn with_path(mut path: Option<PathBuf>) -> (Self, Task<Message>) {
-        let mut notice = None;
-        let text = match path.as_ref().map(std::fs::read_to_string).transpose() {
-            Ok(text) => text.unwrap_or_default(),
-            Err(e) => { notice = Some(format!("파일 열기 실패: {e}")); path = None; String::new() }
-        };
-        let settings = load_settings();
-        let now = Instant::now();
-        let mut w = Self {
-            path, content: text_editor::Content::with_text(&text), saved: text, dirty: false, words: 0, chars: 0,
-            undo: Vec::new(), redo: Vec::new(), last_edit: now,
-            faces: Faces { regular: Font::DEFAULT, bold: Font::DEFAULT, italic: Font::DEFAULT, bold_italic: Font::DEFAULT }, settings, families: font_families(), curated: Vec::new(), font_hangul: false, font_query: String::new(),
-            show_settings: false, system_dark: true,
-            chrome: Animation::new(true).duration(Duration::from_millis(250)), now, notice,
-            find_query: String::new(), show_find: false, matches: Vec::new(), match_index: 0, stats: 0, zero_width: 1.0, edit_group: 0,
-        };
-        w.curated = curated_fonts(&w.families);
-        w.set_font();
-        w.recount();
-        (w, Task::batch([system::theme().map(Message::SystemMode), iced::widget::operation::focus("editor")]))
-    }
-
-    fn set_font(&mut self) {
-        let family = family_named(&self.families, self.settings.font.as_deref());
-        self.faces = faces_of(family);
-        self.font_hangul = has_hangul(family);
-        self.zero_width = zero_width(self.faces.regular, self.settings.size);
+    fn new(writer: Writer) -> Self {
+        Self { mode: Mode::Write, writer, practice: Practice::new() }
     }
 
     fn title(&self) -> String {
-        format!("{}{}", self.file_name(), if self.dirty { " •" } else { "" })
+        match self.mode {
+            Mode::Write => self.writer.title(),
+            Mode::Practice => self.practice.title(),
+        }
     }
 
-    fn file_name(&self) -> String {
-        self.path.as_ref().and_then(|p| p.file_name()).map_or("Untitled".into(), |n| n.to_string_lossy().into_owned())
-    }
-
-    fn palette(&self) -> Palette { self.settings.theme.resolve(self.system_dark).palette() }
-
+    /// 테마는 하나: 집중 글쓰기 설정의 테마를 두 모드가 같이 쓴다.
     fn theme(&self) -> iced::Theme {
-        let p = self.palette();
-        iced::Theme::custom("iamWriter", iced::theme::Palette {
-            background: p.bg, text: p.fg, primary: p.accent, success: p.accent, warning: p.code, danger: p.code,
-        })
+        self.writer.theme()
     }
 
-    fn recount(&mut self) {
-        let t = self.content.text();
-        self.words = t.split_whitespace().count();
-        self.chars = t.chars().filter(|c| !c.is_whitespace()).count();
-        self.dirty = t != self.saved;
-        if self.show_find { self.refresh_matches(); }
-    }
-
-    fn set_text(&mut self, text: &str) {
-        self.content = text_editor::Content::with_text(text);
-        self.edit_group = 0;
-        self.undo.clear();
-        self.redo.clear();
-        self.saved = text.to_owned();
-        self.recount();
-    }
-
-    fn open(&mut self) {
-        if self.dirty && !self.confirm_discard() { return; }
-        let Some(p) = md_dialog().pick_file() else { return };
-        match std::fs::read_to_string(&p) {
-            Ok(t) => { self.set_text(&t); self.path = Some(p); self.notice = None; }
-            Err(e) => error(&format!("열기 실패: {e}")),
+    fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::Writer(m) => self.writer.update(m).map(Message::Writer),
+            // 숨어 있는 동안 도착한 AI·유튜브 결과도 여기로 온다. 포커스·재생은 Practice 가 visible 일 때만 한다.
+            Message::Practice(m) => self.practice.update(m).map(Message::Practice),
+            Message::Switch(mode) => self.switch(mode),
         }
     }
 
-    /// 저장 성공 여부 반환
-    fn save(&mut self, save_as: bool) -> bool {
-        let path = match (&self.path, save_as) {
-            (Some(p), false) => p.clone(),
-            _ => match md_dialog().set_file_name(self.file_name()).save_file() { Some(p) => p, None => return false },
-        };
-        let text = self.content.text();
-        match atomic_save(&path, &text) {
-            Ok(()) => { self.saved = text; self.dirty = false; self.path = Some(path); true }
-            Err(e) => { error(&format!("저장 실패: {e}")); false }
+    /// 모드를 바꾸면 위젯 트리가 새로 만들어져 포커스가 사라지므로 직접 되돌린다.
+    fn switch(&mut self, mode: Mode) -> Task<Message> {
+        if mode == self.mode {
+            return Task::none();
         }
-    }
-
-    /// 저장되지 않은 변경이 있을 때: 저장/버리기/취소. 계속 진행해도 되면 true.
-    /// ponytail: rfd 동기 대화상자(메인 스레드 모달). 비동기 흐름이 필요해지면 AsyncFileDialog + Task 로.
-    fn confirm_discard(&mut self) -> bool {
-        use rfd::{MessageButtons, MessageDialog, MessageDialogResult as R};
-        match MessageDialog::new()
-            .set_title("저장되지 않은 변경")
-            .set_description("변경 사항을 저장할까요?")
-            .set_buttons(MessageButtons::YesNoCancel)
-            .show()
-        {
-            R::Yes => self.save(false),
-            R::No => true,
-            _ => false,
-        }
-    }
-
-    fn edit(&mut self, action: text_editor::Action) {
-        use text_editor::{Action, Edit};
-        if action.is_edit() {
-            let group = match &action {
-                Action::Edit(Edit::Insert(_)) => 1,
-                Action::Edit(Edit::Backspace) => 2,
-                Action::Edit(Edit::Delete) => 3,
-                _ => 0,
-            };
-            if group == 0 || group != self.edit_group || self.content.cursor().selection.is_some()
-                || self.last_edit.elapsed() > Duration::from_millis(800) || self.undo.is_empty() {
-                self.undo.push((self.content.text(), self.content.cursor()));
-                if self.undo.len() > 500 { self.undo.remove(0); }
+        self.mode = mode;
+        self.practice.visible = mode == Mode::Practice;
+        match mode {
+            Mode::Write => {
+                self.writer.show_chrome();
+                iced::widget::operation::focus("editor")
             }
-            self.edit_group = group;
-            self.redo.clear();
-            self.last_edit = Instant::now();
-            self.content.perform(action);
-            self.recount();
-        } else {
-            if !matches!(action, Action::Scroll { .. }) { self.edit_group = 0; }
-            self.content.perform(action);
+            // 숨어 있는 동안 미뤄 둔 재생·포커스를 이어서
+            Mode::Practice => self.practice.resume().map(Message::Practice),
         }
-    }
-
-    fn format_selection(&mut self, marker: &str) {
-        let cursor = self.content.cursor();
-        let selected = self.content.selection().unwrap_or_default();
-        let start = cursor.selection.map_or(cursor.position, |p| {
-            if (p.line, p.column) < (cursor.position.line, cursor.position.column) { p } else { cursor.position }
-        });
-        let text = self.content.text();
-        let offset = self.content.lines().take(start.line).map(|l| l.text.len() + l.ending.as_str().len()).sum::<usize>() + start.column;
-        let end = offset + selected.len();
-        let unwrapping = text[..offset].ends_with(marker) && text[end..].starts_with(marker);
-        let (replacement, body_start) = if unwrapping {
-            self.content.move_to(text_editor::Cursor {
-                position: position_at(&text, end + marker.len()),
-                selection: Some(position_at(&text, offset - marker.len())),
-            });
-            (selected.clone(), offset - marker.len())
-        } else {
-            (format!("{marker}{selected}{marker}"), offset + marker.len())
-        };
-        self.edit(text_editor::Action::Edit(text_editor::Edit::Paste(std::sync::Arc::new(replacement))));
-        let text = self.content.text();
-        self.content.move_to(text_editor::Cursor {
-            position: position_at(&text, body_start + selected.len()),
-            selection: (!selected.is_empty()).then(|| position_at(&text, body_start)),
-        });
-    }
-
-    fn refresh_matches(&mut self) {
-        self.matches = search_matches(&self.content.text(), &self.find_query);
-        self.match_index = 0;
-    }
-
-    fn select_match(&mut self, backwards: bool, advance: bool) {
-        let count = self.matches.len();
-        if count == 0 { return; }
-        if advance { self.match_index = (self.match_index + if backwards { count - 1 } else { 1 }) % count; }
-        self.content.move_to(self.matches[self.match_index]);
-        self.edit_group = 0;
-    }
-
-    fn toggle_settings(&mut self) -> Task<Message> {
-        self.show_settings ^= true;
-        self.show_find = false;
-        self.chrome.go_mut(true, self.now);
-        iced::widget::operation::focus(if self.show_settings { "font-search" } else { "editor" })
-    }
-
-    fn undo_redo(&mut self, redo: bool) {
-        let (from, to) = if redo { (&mut self.redo, &mut self.undo) } else { (&mut self.undo, &mut self.redo) };
-        let Some((text, cursor)) = from.pop() else { return };
-        to.push((self.content.text(), self.content.cursor()));
-        self.content = text_editor::Content::with_text(&text);
-        self.content.move_to(cursor);
-        self.last_edit = Instant::now() - Duration::from_secs(1); // 다음 입력은 새 실행 취소 단위
-        self.recount();
-    }
-
-    fn update(&mut self, msg: Message) -> Task<Message> {
-        self.now = Instant::now();
-        let before = self.settings.clone();
-        let mut task = Task::none();
-        match msg {
-            Message::Edit(a) if !self.show_settings => self.edit(a),
-            Message::Edit(_) => {},
-            Message::DeleteTo(motion) => {
-                let original = self.content.cursor();
-                if original.selection.is_none() { self.content.perform(text_editor::Action::Select(motion)); }
-                self.edit_group = 0;
-                self.edit(text_editor::Action::Edit(text_editor::Edit::Delete));
-                if let Some((_, cursor)) = self.undo.last_mut() { *cursor = original; }
-            }
-            Message::Format(marker) => self.format_selection(marker),
-            Message::Shortcut(k, shift) => match (k.as_str(), shift) {
-                ("s", true) => { self.save(true); }
-                ("s", false) => { self.save(false); }
-                ("o", _) => self.open(),
-                ("n", _) => {
-                    if !self.dirty || self.confirm_discard() {
-                        self.set_text(""); self.path = None; self.notice = None; self.show_find = false; self.show_settings = false;
-                        task = iced::widget::operation::focus("editor");
-                    }
-                }
-                (",", _) => task = self.toggle_settings(),
-                ("f", false) => {
-                    self.show_find = true; self.show_settings = false; self.refresh_matches();
-                    self.chrome.go_mut(true, self.now);
-                    task = iced::widget::operation::focus("document-search");
-                }
-                ("z", s) if !self.show_settings && !self.show_find => self.undo_redo(s),
-                ("f", true) => self.settings.focus ^= true,
-                ("d", true) => self.settings.theme = self.settings.theme.next(),
-                _ => {}
-            },
-            Message::Escape | Message::CloseFind => {
-                self.show_settings = false; self.show_find = false;
-                task = iced::widget::operation::focus("editor");
-            }
-            Message::FindQuery(q) => { self.find_query = q; self.refresh_matches(); self.select_match(false, false); }
-            Message::FindNext(backwards) if self.show_find => self.select_match(backwards, true),
-            Message::FindNext(_) => {},
-            Message::CycleStats => self.stats = (self.stats + 1) % 3,
-            Message::NavigateFocus(backwards) => {
-                task = if backwards { iced::widget::operation::focus_previous() } else { iced::widget::operation::focus_next() };
-            }
-            // 방해 없는 화면: 타이핑하면 숨기고, 마우스를 움직이면 보인다
-            Message::Typed if !self.show_settings && !self.show_find => self.chrome.go_mut(false, self.now),
-            Message::Typed => {}
-            Message::Moved => self.chrome.go_mut(true, self.now),
-            Message::Tick => {}
-            Message::ToggleSettings => task = self.toggle_settings(),
-            Message::FontQuery(q) => self.font_query = q,
-            Message::PickFont(f) => self.settings.font = f,
-            Message::Size(v) => self.settings.size = v,
-            Message::Line(v) => self.settings.line = v,
-            Message::Measure(v) => self.settings.measure = v,
-            Message::SetTheme(t) => self.settings.theme = t,
-            Message::Focus(v) => self.settings.focus = v,
-            Message::Reset => self.settings = Settings::default(),
-            Message::SystemMode(m) => self.system_dark = m == iced::theme::Mode::Dark,
-            Message::CloseRequested(id) => {
-                if !self.dirty || self.confirm_discard() { task = window::close(id); }
-            }
-            Message::Drag => task = window::latest().and_then(window::drag),
-            Message::Maximize => task = window::latest().and_then(window::toggle_maximize),
-            Message::DismissNotice => self.notice = None,
-        }
-        if self.settings != before {
-            if self.settings.font != before.font || self.settings.size != before.size { self.set_font(); }
-            store_settings(&self.settings);
-        }
-        task
-    }
-
-    fn subscription(&self) -> Subscription<Message> {
-        let events = event::listen_with(|e, status, _id| match e {
-            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, physical_key, .. }) => match key.as_ref() {
-                keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Escape),
-                keyboard::Key::Named(keyboard::key::Named::Enter) if status == event::Status::Ignored => Some(Message::FindNext(modifiers.shift())),
-                keyboard::Key::Named(keyboard::key::Named::Tab) if status == event::Status::Ignored => Some(Message::NavigateFocus(modifiers.shift())) ,
-                keyboard::Key::Character(c) if modifiers.command() => {
-                    let key = key.to_latin(physical_key).map(|c| c.to_string()).unwrap_or_else(|| c.to_lowercase());
-                    (status == event::Status::Ignored || matches!(key.as_str(), "," | "s" | "o" | "n" | "f"))
-                        .then_some(Message::Shortcut(key, modifiers.shift()))
-                },
-                _ if modifiers.command() => None,
-                _ => Some(Message::Typed),
-            },
-            Event::Mouse(mouse::Event::CursorMoved { .. }) => Some(Message::Moved),
-            _ => None,
-        });
-        let frames = if self.chrome.is_animating(self.now) { window::frames().map(|_| Message::Tick) } else { Subscription::none() };
-        Subscription::batch([
-            events,
-            frames,
-            window::close_requests().map(Message::CloseRequested),
-            system::theme_changes().map(Message::SystemMode),
-        ])
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let p = self.palette();
-        let s = &self.settings;
-        let alpha = self.chrome.interpolate(0.0, 1.0, self.now);
-        let faint = |c: Color| Color { a: c.a * alpha, ..c };
-
-        // 타이틀바 자리: 끌어서 창 이동, 더블클릭으로 확대, 가운데 파일 이름
-        let titlebar = mouse_area(
-            container(text(self.title()).size(13).color(faint(p.dim))).center(Length::Fill).height(TITLEBAR),
-        ).on_press(Message::Drag).on_double_click(Message::Maximize);
-
-        // 본문
-        let focus = (s.focus && !self.show_find).then(|| para_lines(&self.content, self.content.cursor().position.line));
-        let width = s.measure as f32 * self.zero_width;
-        let editor = text_editor(&self.content)
-            .id("editor")
-            .on_action(Message::Edit)
-            .font(self.faces.regular)
-            .size(s.size)
-            .line_height(s.line)
-            .height(Length::Fill)
-            .padding(Padding { top: 48.0, bottom: 160.0, left: 0.0, right: 0.0 })
-            .key_binding(editor_binding)
-            .style(move |_, _| text_editor::Style {
-                background: Color::TRANSPARENT.into(),
-                border: Border::default(),
-                placeholder: p.dim,
-                value: p.accent, // 모든 글자는 하이라이터가 칠하므로 이 색은 커서에만 쓰인다
-                selection: Color { a: 0.3, ..p.accent },
-            })
-            .placeholder("쓰기 시작하세요…")
-            .highlight_with::<Markdown>(HlSettings { p, faces: self.faces, focus, found: self.show_find.then(|| self.matches.get(self.match_index).copied()).flatten() }, |span: &Span, _: &iced::Theme| iced::advanced::text::highlighter::Format { color: Some(span.color), font: Some(span.font) });
-        let editor = ImeFix { inner: editor.into(), font: self.faces.regular, size: s.size, line: s.line, fg: p.strong, bg: p.bg, accent: p.accent };
-        let body = container(container(Element::from(editor)).max_width(width)).center_x(Length::Fill).height(Length::Fill)
-            .padding(Padding { left: 16.0, right: 16.0, ..Padding::ZERO });
-
-        // 상태 표시줄
-        let modes = if s.focus { "포커스" } else { "" };
-        let mut status = row![text(modes).size(12).color(faint(p.fg))].spacing(12).align_y(iced::Alignment::Center);
-        if self.dirty { status = status.push(text("• 저장 안 됨").size(12).color(p.fg)); }
-        if let Some(n) = &self.notice {
-            status = status.push(mouse_area(text(format!("⚠ {n}")).size(12).color(p.code)).on_press(Message::DismissNotice));
-        }
-        status = status
-            .push(space::horizontal())
-            .push(button(text(match self.stats {
-                0 => format!("{} 자 (공백 제외)", self.chars),
-                1 => format!("{} 단어", self.words),
-                _ => format!("약 {}분", self.words.div_ceil(200)),
-            }).size(12).color(faint(p.fg))).on_press(Message::CycleStats).style(button::text))
-            .push(button(text("설정").size(12).color(faint(p.fg))).on_press(Message::ToggleSettings).style(button::text));
-        let status = container(status).padding(Padding { top: 6.0, bottom: 10.0, left: 16.0, right: 16.0 });
-
-        let search: Element<'_, Message> = if self.show_find {
-            row![
-                text_input("문서에서 찾기…", &self.find_query).id("document-search").on_input(Message::FindQuery).size(14),
-                text(format!("{}/{}", if self.matches.is_empty() { 0 } else { self.match_index + 1 }, self.matches.len())).size(12),
-                button("이전").on_press(Message::FindNext(true)),
-                button("다음").on_press(Message::FindNext(false)),
-                button("닫기").on_press(Message::CloseFind),
-            ].spacing(8).padding(8).align_y(iced::Alignment::Center).into()
-        } else { space::vertical().height(0).into() };
-        let main = container(column![titlebar, search, body, status])
-            .style(move |_| container::Style { background: Some(p.bg.into()), ..Default::default() })
-            .width(Length::Fill).height(Length::Fill);
-
-        if !self.show_settings { return main.into(); }
-        // 설정: 오른쪽 위에 떠 있는 카드
-        let card = container(opaque(scrollable(self.settings_card(p)).height(Length::Fill).width(320)))
-            .align_right(Length::Fill)
-            .padding(Padding { top: TITLEBAR + 8.0, right: 16.0, bottom: 48.0, left: 0.0 });
-        stack![main, card].into()
+        let body = match self.mode {
+            Mode::Write => self.writer.view().map(Message::Writer),
+            Mode::Practice => self.practice.view(self.writer.palette()).map(Message::Practice),
+        };
+        // 모드 전환 버튼은 타이틀바 오른쪽에 겹쳐 그린다. 버튼 밖의 타이틀바는 아래 층이 그대로 받아 창 끌기가 된다.
+        let content = stack![body, self.mode_switch()];
+        Element::new(command_keys::StripCommandText { inner: content.into() })
     }
 
-    fn settings_card(&self, p: Palette) -> Element<'_, Message> {
-        let s = &self.settings;
-        let label = |t| text(t).size(12).color(p.fg);
-        let q = self.font_query.to_lowercase();
-        let current = s.font.clone().unwrap_or_else(|| "Menlo".into());
-        let current = self.curated.iter().flat_map(|(_, v)| v).find(|it| it.family == current).map_or(current, |it| it.label.to_owned());
-        let item = |face: Font, label: &'static str, value: Option<String>, hangul: bool| {
-            let selected = value == s.font;
-            let mut r = row![text(label).size(13).font(face)].align_y(iced::Alignment::Center);
-            if hangul { r = r.push(space::horizontal()).push(text("가").size(11).color(p.fg)); }
-            button(r)
-                .on_press(Message::PickFont(value))
-                .width(Length::Fill)
+    fn mode_switch(&self) -> Element<'_, Message> {
+        let p = self.writer.palette();
+        // 집중 글쓰기에서 타이핑하면 상태줄과 함께 흐려진다
+        let alpha = if self.mode == Mode::Write { self.writer.chrome_alpha() } else { 1.0 };
+        let tab = |label: &'static str, mode: Mode| {
+            let on = self.mode == mode;
+            button(text(label).size(12))
+                .on_press(Message::Switch(mode))
+                .padding([3, 10])
                 .style(move |_, st| button::Style {
-                    background: (selected || st == button::Status::Hovered).then(|| Color { a: if selected { 0.25 } else { 0.1 }, ..p.accent }.into()),
-                    text_color: p.fg,
-                    border: Border::default().rounded(4),
+                    background: (on || st == button::Status::Hovered)
+                        .then(|| Color { a: if on { 0.14 } else { 0.07 } * alpha, ..p.fg }.into()),
+                    text_color: Color { a: alpha, ..if on { p.strong } else { p.muted } },
+                    border: Border::default().rounded(10),
                     ..Default::default()
                 })
         };
-        let group = |name: &'static str| Element::from(container(text(name).size(11).color(p.fg)).padding(Padding { top: 8.0, bottom: 2.0, left: 6.0, right: 0.0 }));
-        let list: Vec<Element<'_, Message>> = if q.is_empty() {
-            let mut v = vec![item(Font::with_name("Menlo"), "Menlo (기본)", None, false).into()];
-            for (g, fonts) in &self.curated {
-                v.push(group(g));
-                v.extend(fonts.iter().map(|it| item(it.face, it.label, Some(it.family.to_owned()), it.hangul).into()));
-            }
-            v
-        } else {
-            // 검색은 설치된 모든 글꼴에서. 한글 포함 여부는 비용 때문에 추천 목록에만 표시
-            let hits = self.families.iter().filter(|n| font_matches(n, &q)).take(200);
-            hits.map(|&f| item(Font::with_name(f), f, Some(f.to_owned()), false).into()).collect()
+        container(row![tab("집중 글쓰기", Mode::Write), tab("영어 공부", Mode::Practice)].spacing(2))
+            .align_right(Length::Fill)
+            .center_y(TITLEBAR)
+            .padding([0, 12])
+            .into()
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        // 키보드 구독은 보이는 모드 하나만: Tab 이 글쓰기에선 포커스 이동, 영어 공부에선 건너뛰기라 둘 다 켜면 함께 동작한다
+        let mode = match self.mode {
+            Mode::Write => self.writer.subscription().map(Message::Writer),
+            Mode::Practice => self.practice.subscription().map(Message::Practice),
         };
-        let list = if list.is_empty() { vec![text("검색 결과 없음").size(13).color(p.fg).into()] } else { list };
-        let list = column(list).spacing(1);
-
-        let themes = row(Theme::ALL.iter().map(|&(t, name)| {
-            let on = s.theme == t;
-            button(text(name).size(12)).on_press(Message::SetTheme(t)).padding([4, 8])
-                .style(move |_, _| button::Style {
-                    background: Some(if on { p.accent } else { Color { a: 0.08, ..p.fg } }.into()),
-                    text_color: if on { p.bg } else { p.fg },
-                    border: Border::default().rounded(12),
-                    ..Default::default()
-                })
-                .into()
-        })).spacing(4).wrap().vertical_spacing(4); // 한글 이름이 길어도 카드 밖으로 넘치지 않게
-
-        let slider_row = |name: &'static str, value: String, s: Element<'static, Message>| {
-            column![row![label(name), space::horizontal(), text(value).size(12).color(p.fg)], s].spacing(4)
-        };
-
-        container(column![
-            row![text("설정").size(16).color(p.strong), space::horizontal(), button("닫기 · Esc").on_press(Message::ToggleSettings).style(button::text)],
-            label("글꼴"),
-            text(current).size(18).font(self.faces.regular).color(p.strong),
-            text("다람쥐 헌 쳇바퀴에 타고파 · The quick brown fox").size(14).font(self.faces.regular).color(p.fg),
-            text(if self.font_hangul { "한글 포함 글꼴" } else { "이 글꼴엔 한글이 없어 한글은 시스템 글꼴로 표시돼요" }).size(11).color(p.fg),
-            text(if self.faces.bold.family != self.faces.regular.family { "굵은 면이 없어 강조는 시스템 Bold 글꼴로 표시돼요" } else { "강조는 Bold · 기울임은 동일 글꼴의 합성 기울임" }).size(11).color(p.fg),
-            text_input("모든 글꼴에서 검색…", &self.font_query).id("font-search").on_input(Message::FontQuery).size(13).padding(6),
-            scrollable(list).height(220).spacing(6),
-            slider_row("크기", format!("{:.0}", s.size), slider(12.0..=32.0, s.size, Message::Size).step(1.0_f32).into()),
-            slider_row("줄간격", format!("{:.2}", s.line), slider(1.2..=2.4, s.line, Message::Line).step(0.05_f32).into()),
-            slider_row("본문 폭 (0 너비 기준)", s.measure.to_string(), slider(40..=100, s.measure, Message::Measure).into()),
-            label("테마"),
-            themes,
-            toggler(s.focus).label("포커스 모드  ⇧⌘F").on_toggle(Message::Focus).size(16).text_size(13),
-            text("⌘N 새 글 · ⌘O 열기 · ⌘S 저장\n⌘F 찾기 · Enter 다음 · ⇧Enter 이전\n⌘B 굵게 · ⌘I 기울임 · ⌘, 설정\n⌘삭제 줄 앞 삭제 · ⌥삭제 단어 삭제\n⌘Z 취소 · ⇧⌘Z 다시").size(12).color(p.fg),
-            button(text("기본값으로").size(12)).on_press(Message::Reset).style(button::text),
-        ].spacing(10))
-        .width(Length::Fill)
-        .padding(18)
-        .style(move |_| container::Style {
-            background: Some(p.panel.into()),
-            border: Border::default().rounded(12).width(1).color(Color { a: 0.08, ..p.fg }),
-            shadow: iced::Shadow { color: Color { a: 0.25, ..Color::BLACK }, offset: iced::Vector::new(0.0, 8.0), blur_radius: 24.0 },
-            ..Default::default()
-        })
-        .into()
+        Subscription::batch([
+            mode,
+            event::listen_with(switch_keys),
+            // 모드와 상관없이 항상. exit_on_close_request(false) 라서 이게 없으면 창이 닫히지 않는다.
+            // 영어 공부 모드에서 닫아도 저장 안 된 글을 확인한다.
+            // map 의 클로저는 아무것도 캡처하면 안 된다(iced 가 컴파일 단계에서 검사).
+            window::close_requests().map(|id| Message::Writer(writer::Message::CloseRequested(id))),
+            system::theme_changes().map(|m| Message::Writer(writer::Message::SystemMode(m))),
+        ])
     }
 }
 
-// ───────────────────────── 한글 조합 표시 보정 ─────────────────────────
-
-/// 한글을 조합하는 동안(ㅎ → 하 → 한) iced 는 조합 중인 글자를 커서 칸 **맨 아래**에 UI 글꼴로 띄운다.
-/// 줄간격이 1.3 보다 크면 글자가 줄 아래로 처져 보이고, 본문 글꼴과도 달라서 확정되는 순간 위로 튄다.
-/// 이 래퍼는 iced 의 오버레이를 끄고, 조합 중인 글자를 본문과 같은 글꼴·같은 줄 위치에 직접 그린다.
-struct ImeFix<'a> {
-    inner: Element<'a, Message>,
-    font: Font,
-    size: f32,
-    line: f32,
-    fg: Color,
-    bg: Color,
-    accent: Color,
+/// ⌘1 집중 글쓰기 · ⌘2 영어 공부. 한글 자판에서도 물리 키 기준으로 읽는다.
+fn switch_keys(event: Event, _status: event::Status, _window: window::Id) -> Option<Message> {
+    let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, physical_key, .. }) = event else { return None };
+    if !modifiers.command() {
+        return None;
+    }
+    match key.to_latin(physical_key) {
+        Some('1') => Some(Message::Switch(Mode::Write)),
+        Some('2') => Some(Message::Switch(Mode::Practice)),
+        _ => None,
+    }
 }
 
-#[derive(Default)]
-struct ImeState { preedit: Option<(String, iced::Rectangle)> } // (조합 중인 글자, 커서 칸)
+// ───────────────────────── ⌘ 조합의 글자 입력 막기 ─────────────────────────
 
-mod ime_fix {
-    use super::*;
+mod command_keys {
+    use super::Message;
     use iced::advanced::{
         layout, overlay, renderer,
-        text::{self as adv_text, Paragraph as _, Renderer as _},
         widget::{tree, Operation, Tree, Widget},
-        Clipboard, Layout, Renderer as _, Shell,
+        Clipboard, Layout, Shell,
     };
-    use iced::advanced::InputMethod;
-    use iced::{Pixels, Rectangle, Size, Vector};
+    use iced::{keyboard, mouse, Element, Event, Length, Rectangle, Size, Vector};
 
     type R = iced::Renderer;
 
-    impl Widget<Message, iced::Theme, R> for ImeFix<'_> {
+    /// macOS 는 ⌘ 조합 키에도 글자(text)를 실어 보내고, iced 의 text_input 은 ⌘C·X·V·A 외에는 그 글자를 그대로 입력한다
+    /// (⌘1 → 따라치기 칸에 '1', ⌘F → 검색 칸에 'f'). 그래서 ⌘ 가 눌린 키 입력은 글자만 지우고 넘긴다.
+    /// 키 자체는 그대로라서 위젯 단축키(⌘C·⌘V…)와 구독으로 처리하는 앱 단축키는 영향이 없다.
+    pub(crate) struct StripCommandText<'a> {
+        pub(crate) inner: Element<'a, Message>,
+    }
+
+    /// 글자를 지운 이벤트. 바꿀 게 없으면 None.
+    pub(crate) fn strip(event: &Event) -> Option<Event> {
+        let Event::Keyboard(keyboard::Event::KeyPressed { modifiers, text: Some(_), .. }) = event else { return None };
+        if !modifiers.command() {
+            return None;
+        }
+        let mut stripped = event.clone();
+        if let Event::Keyboard(keyboard::Event::KeyPressed { text, .. }) = &mut stripped {
+            *text = None;
+        }
+        Some(stripped)
+    }
+
+    // 상태가 없는 투명한 래퍼: 위젯 트리도 감싼 위젯의 것을 그대로 쓴다.
+    impl Widget<Message, iced::Theme, R> for StripCommandText<'_> {
         fn size(&self) -> Size<Length> { self.inner.as_widget().size() }
         fn size_hint(&self) -> Size<Length> { self.inner.as_widget().size_hint() }
-        fn tag(&self) -> tree::Tag { tree::Tag::of::<ImeState>() }
-        fn state(&self) -> tree::State { tree::State::new(ImeState::default()) }
-        fn children(&self) -> Vec<Tree> { vec![Tree::new(&self.inner)] }
-        fn diff(&self, tree: &mut Tree) { tree.diff_children(std::slice::from_ref(&self.inner)); }
+        fn tag(&self) -> tree::Tag { self.inner.as_widget().tag() }
+        fn state(&self) -> tree::State { self.inner.as_widget().state() }
+        fn children(&self) -> Vec<Tree> { self.inner.as_widget().children() }
+        fn diff(&self, tree: &mut Tree) { self.inner.as_widget().diff(tree) }
 
         fn layout(&mut self, tree: &mut Tree, renderer: &R, limits: &layout::Limits) -> layout::Node {
-            self.inner.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
+            self.inner.as_widget_mut().layout(tree, renderer, limits)
         }
 
         fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &R, op: &mut dyn Operation) {
-            self.inner.as_widget_mut().operate(&mut tree.children[0], layout, renderer, op);
+            self.inner.as_widget_mut().operate(tree, layout, renderer, op);
         }
 
         fn update(
-            &mut self, tree: &mut Tree, event: &iced::Event, layout: Layout<'_>, cursor: mouse::Cursor,
+            &mut self, tree: &mut Tree, event: &Event, layout: Layout<'_>, cursor: mouse::Cursor,
             renderer: &R, clipboard: &mut dyn Clipboard, shell: &mut Shell<'_, Message>, viewport: &Rectangle,
         ) {
-            self.inner.as_widget_mut().update(&mut tree.children[0], event, layout, cursor, renderer, clipboard, shell, viewport);
-            let focused = tree.children[0].state.downcast_ref::<text_editor::State<Markdown>>().is_focused();
-            let state = tree.state.downcast_mut::<ImeState>();
-            if !focused {
-                state.preedit = None;
-            } else if let InputMethod::Enabled { cursor, preedit, .. } = shell.input_method_mut() {
-                // 조합 중 글자를 가져오고 iced 오버레이는 끈다. IME 자체(후보창 위치 등)는 그대로 둔다
-                let new = preedit.take().filter(|p| !p.content.is_empty()).map(|p| (p.content, *cursor));
-                if new != state.preedit { shell.request_redraw(); }
-                state.preedit = new;
-            }
+            let stripped = strip(event);
+            let event = stripped.as_ref().unwrap_or(event);
+            self.inner.as_widget_mut().update(tree, event, layout, cursor, renderer, clipboard, shell, viewport);
         }
 
         fn draw(
             &self, tree: &Tree, renderer: &mut R, theme: &iced::Theme, style: &renderer::Style,
             layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle,
         ) {
-            self.inner.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
-            let Some((content, caret)) = &tree.state.downcast_ref::<ImeState>().preedit else { return };
-            let text = adv_text::Text {
-                content: content.clone(),
-                bounds: Size::INFINITE,
-                size: Pixels(self.size),
-                line_height: adv_text::LineHeight::Relative(self.line), // 본문과 같은 줄 높이 → 같은 기준선
-                font: self.font,
-                align_x: adv_text::Alignment::Default,
-                align_y: iced::alignment::Vertical::Top,
-                shaping: adv_text::Shaping::Advanced,
-                wrapping: adv_text::Wrapping::None,
-            };
-            // 폭 재기용 paragraph. 그리기엔 쓰지 않는다: 렌더러는 paragraph 를 약한 참조로만 들고 있어서
-            // draw 가 끝나 지역 변수가 사라지면 글자가 안 그려진다. fill_text 는 글자를 직접 소유한다.
-            let width = <R as adv_text::Renderer>::Paragraph::with_text(text.with_content(content.as_str())).min_width();
-            let bounds = Rectangle::new(caret.position(), Size::new(width, caret.height));
-            // 새 레이어: 같은 레이어에선 글자가 사각형보다 나중에 그려져 뒤 글자가 비친다
-            renderer.with_layer(*viewport, |r| {
-                r.fill_quad(renderer::Quad { bounds, ..Default::default() }, self.bg);
-                r.fill_text(text, bounds.position(), self.fg, bounds);
-                let underline = Rectangle::new(bounds.position() + Vector::new(0.0, bounds.height - 4.0), Size::new(bounds.width, 1.5));
-                r.fill_quad(renderer::Quad { bounds: underline, ..Default::default() }, self.accent);
-            });
+            self.inner.as_widget().draw(tree, renderer, theme, style, layout, cursor, viewport);
         }
 
         fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &R) -> mouse::Interaction {
-            self.inner.as_widget().mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
+            self.inner.as_widget().mouse_interaction(tree, layout, cursor, viewport, renderer)
         }
 
         fn overlay<'b>(
             &'b mut self, tree: &'b mut Tree, layout: Layout<'b>, renderer: &R, viewport: &Rectangle, translation: Vector,
         ) -> Option<overlay::Element<'b, Message, iced::Theme, R>> {
-            self.inner.as_widget_mut().overlay(&mut tree.children[0], layout, renderer, viewport, translation)
+            self.inner.as_widget_mut().overlay(tree, layout, renderer, viewport, translation)
         }
     }
+}
 
-    impl<'a> From<ImeFix<'a>> for Element<'a, Message> {
-        fn from(w: ImeFix<'a>) -> Self { Element::new(w) }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press(c: &str, modifiers: keyboard::Modifiers) -> Event {
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character(c.into()),
+            modified_key: keyboard::Key::Character(c.into()),
+            physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: Some(c.into()),
+            repeat: false,
+        })
     }
-}
 
-fn md_dialog() -> rfd::FileDialog {
-    rfd::FileDialog::new().add_filter("Markdown", &["md", "markdown", "txt"])
-}
+    #[test]
+    fn switching_modes_tracks_practice_visibility() {
+        // App::boot() 은 쓰지 않는다: 테스트 실행 중엔 args().nth(1) 이 테스트 이름이라 파일로 열린다
+        let (writer, _) = Writer::with_path(None);
+        let mut app = App::new(writer);
+        assert_eq!(app.mode, Mode::Write);
+        assert!(!app.practice.visible, "앱은 집중 글쓰기로 시작하므로 영어 공부는 숨어 있다");
+        let _ = app.update(Message::Switch(Mode::Practice));
+        assert!(app.mode == Mode::Practice && app.practice.visible);
+        assert_eq!(app.title(), "영어 공부");
+        let _ = app.update(Message::Switch(Mode::Write));
+        assert!(app.mode == Mode::Write && !app.practice.visible);
+    }
 
-fn error(msg: &str) {
-    rfd::MessageDialog::new().set_level(rfd::MessageLevel::Error).set_description(msg).show();
-}
-
-#[test]
-fn para_lines_works() {
-    let l = text_editor::Content::with_text("one\n\ntwo\nlines\n\nthree");
-    assert_eq!(para_lines(&l, 0), (0, 0));
-    assert_eq!(para_lines(&l, 3), (2, 3));
-    assert_eq!(para_lines(&l, 1), (1, 1));
-    assert_eq!(para_lines(&l, 5), (5, 5));
-}
-
-#[test]
-fn inline_spans_works() {
-    let kinds = |s: &str| inline_spans(s).into_iter().map(|(r, k)| (s[r].to_string(), k)).collect::<Vec<_>>();
-    use Kind::*;
-    assert_eq!(kinds("**굵게** 와 *기울임* `코드`"), vec![
-        ("**".into(), Mark), ("굵게".into(), Bold), ("**".into(), Mark), (" 와 ".into(), Plain),
-        ("*".into(), Mark), ("기울임".into(), Italic), ("*".into(), Mark), (" ".into(), Plain),
-        ("`".into(), Mark), ("코드".into(), Code), ("`".into(), Mark),
-    ]);
-    assert_eq!(kinds("닫히지 않은 **별"), vec![("닫히지 않은 **별".into(), Plain)]);
-    assert_eq!(kinds("snake_case_name"), vec![("snake_case_name".into(), Plain)]);
-    assert_eq!(kinds("2 * 3 * 4"), vec![("2 * 3 * 4".into(), Plain)]);
-    assert_eq!(kinds(""), vec![]);
-}
-
-#[test]
-fn korean_renders_without_tofu() {
-    // 한글이 없는 Menlo 와 UI 글꼴 모두에서 '한글' 이 .notdef(0) 없이 그려져야 한다(대체 글꼴 동작)
-    use iced::advanced::graphics::text::cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping};
-    assert!(has_hangul("Apple SD Gothic Neo"));
-    assert!(!has_hangul("Menlo"));
-    // Regular 가 없는 글꼴도 실제 있는 굵기를 골라야 한다
-    let f = faces_of("Menlo");
-    assert_eq!((f.regular.weight, f.bold.weight, f.italic.style), (font::Weight::Normal, font::Weight::Bold, font::Style::Oblique));
-    let mut fs = font_system().write().unwrap();
-    let fs = fs.raw();
-    for family in ["Menlo", "Apple SD Gothic Neo"] {
-        let mut b = Buffer::new(fs, Metrics::new(16.0, 20.0));
-        b.set_text(fs, "한글 입력 Abc", &Attrs::new().family(Family::Name(family)), Shaping::Advanced, None);
-        b.shape_until_scroll(fs, false);
-        let glyphs: Vec<_> = b.layout_runs().flat_map(|r| r.glyphs.iter().map(|g| g.glyph_id)).collect();
-        assert!(!glyphs.is_empty() && glyphs.iter().all(|&g| g != 0), "{family}: {glyphs:?}");
+    #[test]
+    fn command_keys_switch_modes_and_never_type_text() {
+        use keyboard::Modifiers;
+        let to = |e: Event| switch_keys(e, event::Status::Ignored, window::Id::unique());
+        assert!(matches!(to(press("1", Modifiers::COMMAND)), Some(Message::Switch(Mode::Write))));
+        assert!(matches!(to(press("2", Modifiers::COMMAND)), Some(Message::Switch(Mode::Practice))));
+        assert!(to(press("2", Modifiers::empty())).is_none(), "⌘ 없는 2 는 그냥 글자");
+        // ⌘ 조합은 글자만 지우고 키는 남긴다. ⌘ 없는 입력은 건드리지 않는다
+        let Some(Event::Keyboard(keyboard::Event::KeyPressed { text, key, .. })) = command_keys::strip(&press("1", Modifiers::COMMAND)) else {
+            panic!("⌘1 은 바뀌어야 한다")
+        };
+        assert_eq!((text, key), (None, keyboard::Key::Character("1".into())));
+        assert!(command_keys::strip(&press("a", Modifiers::SHIFT)).is_none());
     }
 }

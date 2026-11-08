@@ -12,6 +12,7 @@
 - **글꼴:** cosmic-text(fontdb)가 시스템 글꼴을 직접 읽는다. 굵게·기울임 면과 한글 대체 글꼴도 자동으로 찾는다.
 - **파일 대화상자:** `rfd` 동기 대화상자를 쓴다.
 - **설정 저장:** `~/Library/Application Support/iamWriter/settings.json`
+- **두 모드:** 2026-11-08부터 한 창에 **집중 글쓰기**(이 문서의 대상)와 **영어 공부**(typingEng 이식)가 있다. ⌘1/⌘2로 바꾸고 테마를 함께 쓴다. 영어 공부 쪽 설계는 [TYPINGENG_PORT.md](TYPINGENG_PORT.md) 참고.
 
 ### text_editor 의 한계
 

@@ -19,7 +19,10 @@ pub fn char_states(target: &str, typed: &str) -> Vec<CharState> {
 }
 
 pub fn count_correct(target: &str, typed: &str) -> usize {
-    char_states(target, typed).iter().filter(|s| **s == CharState::Correct).count()
+    char_states(target, typed)
+        .iter()
+        .filter(|s| **s == CharState::Correct)
+        .count()
 }
 
 /// 표준 WPM: 맞은 글자 5개 = 1단어.
@@ -71,7 +74,10 @@ mod tests {
     fn wpm_and_missed() {
         assert_eq!(wpm(50, 60.0), 10.0);
         assert_eq!(wpm(10, 0.0), 0.0);
-        assert_eq!(missed_words("I like coffee.", "I lika coffee,"), vec!["like", "coffee"]);
+        assert_eq!(
+            missed_words("I like coffee.", "I lika coffee,"),
+            vec!["like", "coffee"]
+        );
         assert!(missed_words("Hi there", "Hi").is_empty());
         assert_eq!(count_correct("hello", "help"), 3);
     }

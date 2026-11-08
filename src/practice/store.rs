@@ -16,13 +16,19 @@ fn dir() -> PathBuf {
     if cfg!(test) {
         std::env::temp_dir().join(format!("iamwriter-practice-test-{}", std::process::id()))
     } else {
-        std::env::home_dir().unwrap_or_default().join("Library/Application Support/iamWriter")
+        std::env::home_dir()
+            .unwrap_or_default()
+            .join("Library/Application Support/iamWriter")
     }
 }
 
 /// typingEng 가 쓰던 옛 파일. 테스트 빌드에서는 임시 폴더 안의 (보통 없는) 경로.
 fn legacy(name: &str) -> PathBuf {
-    if cfg!(test) { dir().join("legacy").join(name) } else { std::env::home_dir().unwrap_or_default().join(name) }
+    if cfg!(test) {
+        dir().join("legacy").join(name)
+    } else {
+        std::env::home_dir().unwrap_or_default().join(name)
+    }
 }
 
 fn load<T: Default + DeserializeOwned>((name, old): (&str, &str)) -> T {
@@ -31,7 +37,14 @@ fn load<T: Default + DeserializeOwned>((name, old): (&str, &str)) -> T {
 
 /// 앞에서부터 읽고 해석까지 되는 첫 파일. 새 파일이 없거나 깨졌을 때만 옛 파일을 읽는다.
 fn load_first<T: Default + DeserializeOwned>(paths: &[PathBuf]) -> T {
-    paths.iter().find_map(|p| std::fs::read(p).ok().and_then(|b| serde_json::from_slice(&b).ok())).unwrap_or_default()
+    paths
+        .iter()
+        .find_map(|p| {
+            std::fs::read(p)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+        })
+        .unwrap_or_default()
 }
 
 fn save<T: Serialize>((name, _): (&str, &str), value: &T) {
@@ -40,7 +53,9 @@ fn save<T: Serialize>((name, _): (&str, &str), value: &T) {
 
 /// 임시 파일에 쓴 뒤 rename — 쓰다가 앱이 꺼져도 기존 파일이 깨지지 않는다.
 fn write_json<T: Serialize>(path: &Path, value: &T) {
-    let Ok(s) = serde_json::to_string(value) else { return };
+    let Ok(s) = serde_json::to_string(value) else {
+        return;
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -126,7 +141,11 @@ mod tests {
         let home = std::env::home_dir().unwrap_or_default();
         assert!(dir().starts_with(std::env::temp_dir()), "{:?}", dir());
         assert!(!dir().starts_with(home.join("Library")));
-        assert!(legacy(STATS.1).starts_with(std::env::temp_dir()), "{:?}", legacy(STATS.1));
+        assert!(
+            legacy(STATS.1).starts_with(std::env::temp_dir()),
+            "{:?}",
+            legacy(STATS.1)
+        );
     }
 
     #[test]
@@ -140,7 +159,10 @@ mod tests {
 
         // 새 파일이 없으면 옛 파일을 읽는다
         let mut s: Stats = load_first(&[new.clone(), old.clone()]);
-        assert_eq!((s.lines_typed, s.missed["coffee"], s.en_font.as_deref()), (69, 2, Some("JetBrains Mono")));
+        assert_eq!(
+            (s.lines_typed, s.missed["coffee"], s.en_font.as_deref()),
+            (69, 2, Some("JetBrains Mono"))
+        );
         // 저장은 새 위치에만 (폴더가 없어도 만든다)
         s.lines_typed = 70;
         write_json(&new, &s);

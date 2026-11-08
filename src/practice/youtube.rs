@@ -19,7 +19,11 @@ pub struct Chunk {
 
 impl Chunk {
     pub fn text(&self) -> String {
-        self.words.iter().map(|w| w.1.as_str()).collect::<Vec<_>>().join(" ")
+        self.words
+            .iter()
+            .map(|w| w.1.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -37,14 +41,25 @@ pub fn video_id(url: &str) -> Option<String> {
     let rest = ["v=", "youtu.be/", "shorts/", "embed/", "live/"]
         .iter()
         .find_map(|p| url.split_once(p).map(|(_, r)| r))?;
-    let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    let id: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
     (id.len() == 11).then_some(id)
 }
 
 /// 기본 브라우저로 연다.
 pub fn open_in_browser(url: &str) -> Result<(), String> {
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    Command::new(opener).arg(url).spawn().map(|_| ()).map_err(|e| format!("브라우저를 열 수 없습니다: {e}"))
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    Command::new(opener)
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("브라우저를 열 수 없습니다: {e}"))
 }
 
 /// 자막 하나를 받는다. YouTube 요청을 최소화하는 순서:
@@ -68,7 +83,8 @@ pub fn fetch_transcript(url: &str, cookies: bool) -> Result<Transcript, String> 
         let mut cookies = cookies;
         // "--" 뒤에 URL → '-'로 시작하는 입력이 옵션으로 해석되지 않게
         let info = ytdlp(&dir, &mut cookies, &["-J", "--no-playlist", "--", url])?;
-        let v: Value = serde_json::from_slice(&info.stdout).map_err(|_| "영상 정보를 읽을 수 없습니다.".to_string())?;
+        let v: Value = serde_json::from_slice(&info.stdout)
+            .map_err(|_| "영상 정보를 읽을 수 없습니다.".to_string())?;
         let id = v["id"].as_str().unwrap_or_default().to_string();
         let title = v["title"].as_str().unwrap_or(&id).to_string();
         let (flag, lang) = pick_track(&v).ok_or("영어 자막이 없는 영상입니다.")?;
@@ -78,7 +94,18 @@ pub fn fetch_transcript(url: &str, cookies: bool) -> Result<Transcript, String> 
         ytdlp(
             &dir,
             &mut cookies,
-            &["--load-info-json", &info_arg, "--skip-download", flag, "--sub-langs", lang, "--sub-format", "vtt", "-o", "sub"],
+            &[
+                "--load-info-json",
+                &info_arg,
+                "--skip-download",
+                flag,
+                "--sub-langs",
+                lang,
+                "--sub-format",
+                "vtt",
+                "-o",
+                "sub",
+            ],
         )?;
         let vtt = std::fs::read_to_string(dir.join(format!("sub.{lang}.vtt")))
             .map_err(|_| "자막 파일을 받지 못했습니다. 잠시 후 다시 시도하세요.".to_string())?;
@@ -86,7 +113,12 @@ pub fn fetch_transcript(url: &str, cookies: bool) -> Result<Transcript, String> 
         if words.is_empty() {
             return Err("자막이 비어 있습니다.".into());
         }
-        Ok(Transcript { id, title, words, end })
+        Ok(Transcript {
+            id,
+            title,
+            words,
+            end,
+        })
     })();
     let _ = std::fs::remove_dir_all(&dir);
     result
@@ -100,14 +132,21 @@ fn pick_track(info: &Value) -> Option<(&'static str, &'static str)> {
     if has("automatic_captions", "en-orig") {
         return Some(("--write-auto-subs", "en-orig"));
     }
-    if let Some(l) = ["en", "en-US", "en-GB"].into_iter().find(|l| has("subtitles", l)) {
+    if let Some(l) = ["en", "en-US", "en-GB"]
+        .into_iter()
+        .find(|l| has("subtitles", l))
+    {
         return Some(("--write-subs", l));
     }
     has("automatic_captions", "en").then_some(("--write-auto-subs", "en"))
 }
 
 /// yt-dlp 실행. 429면 10초·30초 쉬었다가 다시, 쿠키를 못 읽으면 쿠키 없이 다시 시도한다.
-fn ytdlp(dir: &std::path::Path, cookies: &mut bool, args: &[&str]) -> Result<std::process::Output, String> {
+fn ytdlp(
+    dir: &std::path::Path,
+    cookies: &mut bool,
+    args: &[&str],
+) -> Result<std::process::Output, String> {
     let mut waits = [10u64, 30].into_iter();
     loop {
         let mut cmd = Command::new("yt-dlp");
@@ -117,7 +156,8 @@ fn ytdlp(dir: &std::path::Path, cookies: &mut bool, args: &[&str]) -> Result<std
         }
         let out = cmd.args(args).output().map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => {
-                "yt-dlp를 찾을 수 없습니다. 터미널에서 `brew install yt-dlp` 후 다시 시도하세요.".to_string()
+                "yt-dlp를 찾을 수 없습니다. 터미널에서 `brew install yt-dlp` 후 다시 시도하세요."
+                    .to_string()
             }
             _ => format!("yt-dlp 실행 실패: {e}"),
         })?;
@@ -138,7 +178,10 @@ fn ytdlp(dir: &std::path::Path, cookies: &mut bool, args: &[&str]) -> Result<std
                         Chrome에서 YouTube에 로그인한 뒤 '로그인 쿠키 사용'을 켜면 거의 생기지 않습니다."
                 .into());
         }
-        return Err(format!("yt-dlp 오류: {}", err.trim().lines().last().unwrap_or("")));
+        return Err(format!(
+            "yt-dlp 오류: {}",
+            err.trim().lines().last().unwrap_or("")
+        ));
     }
 }
 
@@ -148,7 +191,8 @@ fn ts(s: &str) -> Option<f64> {
     if !s.contains(':') {
         return None;
     }
-    s.split(':').try_fold(0.0, |acc, p| p.parse::<f64>().ok().map(|x| acc * 60.0 + x))
+    s.split(':')
+        .try_fold(0.0, |acc, p| p.parse::<f64>().ok().map(|x| acc * 60.0 + x))
 }
 
 /// WebVTT → (단어별 시각, 마지막 큐가 끝나는 시각).
@@ -175,7 +219,9 @@ pub fn parse_vtt(vtt: &str) -> (Vec<Word>, f64) {
         }
         if line.is_empty()
             || line.chars().all(|c| c.is_ascii_digit())
-            || ["WEBVTT", "Kind:", "Language:", "NOTE", "STYLE"].iter().any(|p| line.starts_with(p))
+            || ["WEBVTT", "Kind:", "Language:", "NOTE", "STYLE"]
+                .iter()
+                .any(|p| line.starts_with(p))
         {
             continue;
         }
@@ -184,7 +230,9 @@ pub fn parse_vtt(vtt: &str) -> (Vec<Word>, f64) {
         let mut rest = line;
         while let Some(open) = rest.find('<') {
             pieces.last_mut().unwrap().1.push_str(&rest[..open]);
-            let Some(close) = rest[open..].find('>') else { break };
+            let Some(close) = rest[open..].find('>') else {
+                break;
+            };
             if let Some(t) = ts(&rest[open + 1..open + close]) {
                 pieces.push((Some(t), String::new()));
             }
@@ -200,7 +248,11 @@ pub fn parse_vtt(vtt: &str) -> (Vec<Word>, f64) {
                 (t, clean.split_whitespace().map(String::from).collect())
             })
             .collect();
-        let joined = pieces.iter().flat_map(|p| p.1.iter().map(String::as_str)).collect::<Vec<_>>().join(" ");
+        let joined = pieces
+            .iter()
+            .flat_map(|p| p.1.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ");
         if joined.is_empty() || joined == last_line {
             continue;
         }
@@ -255,19 +307,30 @@ pub fn chunks(words: &[Word], end: f64, n: usize) -> Vec<Chunk> {
         if words.len() > i + n + 20 {
             // 남은 게 n+20단어 이하면 자투리 세트를 만들지 않고 한 번에
             let window = (i + n).saturating_sub(20).max(i + 1)..(i + n + 20).min(words.len());
-            let sentence_end = window.clone().filter(|&j| words[j - 1].1.ends_with(['.', '?', '!'])).min_by_key(|&j| j.abs_diff(i + n));
-            let longest_pause = window.max_by(|&a, &b| (words[a].0 - words[a - 1].0).total_cmp(&(words[b].0 - words[b - 1].0)));
+            let sentence_end = window
+                .clone()
+                .filter(|&j| words[j - 1].1.ends_with(['.', '?', '!']))
+                .min_by_key(|&j| j.abs_diff(i + n));
+            let longest_pause = window.max_by(|&a, &b| {
+                (words[a].0 - words[a - 1].0).total_cmp(&(words[b].0 - words[b - 1].0))
+            });
             stop = sentence_end.or(longest_pause).unwrap_or(stop);
         }
         let chunk_end = words.get(stop).map_or(end, |w| w.0);
-        out.push(Chunk { words: words[i..stop].to_vec(), end: chunk_end });
+        out.push(Chunk {
+            words: words[i..stop].to_vec(),
+            end: chunk_end,
+        });
         i = stop;
     }
     out
 }
 
 fn norm(w: &str) -> String {
-    w.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase()
+    w.chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .to_lowercase()
 }
 
 /// Claude가 문장으로 정리한 줄마다 영상 구간(start, end)을 붙인다.
@@ -279,7 +342,12 @@ pub fn align(chunk: &Chunk, lines: &mut [Line]) {
     }
     let mut cursor = 0;
     for line in lines.iter_mut() {
-        let lw: Vec<String> = line.en.split_whitespace().map(norm).filter(|w| !w.is_empty()).collect();
+        let lw: Vec<String> = line
+            .en
+            .split_whitespace()
+            .map(norm)
+            .filter(|w| !w.is_empty())
+            .collect();
         if !lw.is_empty() {
             // 필러(um, uh) 삭제나 숫자 표기 변경으로 생긴 어긋남을 앞쪽 8단어 / 뒤쪽 3단어 안에서 보정.
             // 흔한 첫 단어(I, and, the…)가 근처에 또 있을 수 있어 첫 두 단어가 맞는 곳을 먼저 찾는다.
@@ -301,7 +369,10 @@ pub fn align(chunk: &Chunk, lines: &mut [Line]) {
         cursor += lw.len();
     }
     for i in 0..lines.len() {
-        lines[i].end = lines.get(i + 1).map_or(chunk.end, |l| l.start).max(lines[i].start);
+        lines[i].end = lines
+            .get(i + 1)
+            .map_or(chunk.end, |l| l.start)
+            .max(lines[i].start);
     }
 }
 
@@ -310,7 +381,13 @@ mod tests {
     use super::*;
 
     fn line(en: &str) -> Line {
-        Line { speaker: String::new(), en: en.into(), ko: String::new(), start: 0.0, end: 0.0 }
+        Line {
+            speaker: String::new(),
+            en: en.into(),
+            ko: String::new(),
+            start: 0.0,
+            end: 0.0,
+        }
     }
 
     #[test]
@@ -324,7 +401,14 @@ mod tests {
         let w = |t: f64, s: &str| (t, s.to_string());
         assert_eq!(
             words,
-            vec![w(0.0, "hello"), w(0.5, "there"), w(2.01, "it's"), w(2.01, "&"), w(2.01, "fine"), w(3.0, "ok")]
+            vec![
+                w(0.0, "hello"),
+                w(0.5, "there"),
+                w(2.01, "it's"),
+                w(2.01, "&"),
+                w(2.01, "fine"),
+                w(3.0, "ok")
+            ]
         );
         assert_eq!(end, 5.0);
     }
@@ -342,16 +426,27 @@ mod tests {
     #[test]
     fn chunk_boundaries() {
         // 구두점이 있으면 n에 가장 가까운 문장 끝
-        let words: Vec<Word> =
-            (1..=200).map(|i| (i as f64, if i == 125 { "end.".to_string() } else { format!("w{i}") })).collect();
+        let words: Vec<Word> = (1..=200)
+            .map(|i| {
+                (
+                    i as f64,
+                    if i == 125 {
+                        "end.".to_string()
+                    } else {
+                        format!("w{i}")
+                    },
+                )
+            })
+            .collect();
         let c = chunks(&words, 210.0, 120);
         assert_eq!(c.len(), 2);
         assert!(c[0].text().ends_with("end.") && c[0].words[0].0 == 1.0 && c[0].end == 126.0);
         assert_eq!(c[1].words.len(), 75);
         assert_eq!(c[1].end, 210.0);
         // 구두점이 없으면(자동 자막) 가장 긴 쉼 앞에서: 110번째 단어 다음에 3초 쉼
-        let words: Vec<Word> =
-            (0..200).map(|i| (i as f64 + if i >= 110 { 3.0 } else { 0.0 }, format!("w{i}"))).collect();
+        let words: Vec<Word> = (0..200)
+            .map(|i| (i as f64 + if i >= 110 { 3.0 } else { 0.0 }, format!("w{i}")))
+            .collect();
         let c = chunks(&words, 300.0, 120);
         assert_eq!(c[0].words.len(), 110);
         // 자투리는 붙인다
@@ -367,7 +462,10 @@ mod tests {
             .map(|(i, w)| (i as f64, w.to_string()))
             .collect();
         let chunk = Chunk { words, end: 20.0 };
-        let mut lines = vec![line("So I went to the store."), line("And then we had 20 apples.")];
+        let mut lines = vec![
+            line("So I went to the store."),
+            line("And then we had 20 apples."),
+        ];
         align(&chunk, &mut lines);
         assert_eq!((lines[0].start, lines[0].end), (0.0, 7.0));
         assert_eq!((lines[1].start, lines[1].end), (7.0, 20.0));
@@ -393,16 +491,29 @@ mod tests {
         let info = |v: Value| pick_track(&v);
         let both = serde_json::json!({"automatic_captions": {"en-orig": [], "en": [], "en-ar": []}, "subtitles": {"en": []}});
         assert_eq!(info(both), Some(("--write-auto-subs", "en-orig")));
-        let manual = serde_json::json!({"automatic_captions": {"en": []}, "subtitles": {"en-US": []}});
+        let manual =
+            serde_json::json!({"automatic_captions": {"en": []}, "subtitles": {"en-US": []}});
         assert_eq!(info(manual), Some(("--write-subs", "en-US")));
-        assert_eq!(info(serde_json::json!({"automatic_captions": {"en": []}})), Some(("--write-auto-subs", "en")));
-        assert_eq!(info(serde_json::json!({"automatic_captions": {"en-ar": []}, "subtitles": {"ko": []}})), None);
+        assert_eq!(
+            info(serde_json::json!({"automatic_captions": {"en": []}})),
+            Some(("--write-auto-subs", "en"))
+        );
+        assert_eq!(
+            info(serde_json::json!({"automatic_captions": {"en-ar": []}, "subtitles": {"ko": []}})),
+            None
+        );
     }
 
     #[test]
     fn ids() {
-        assert_eq!(video_id("https://www.youtube.com/watch?v=jNQXAC9IVRw&t=3s").as_deref(), Some("jNQXAC9IVRw"));
-        assert_eq!(video_id("https://youtu.be/jNQXAC9IVRw?si=x").as_deref(), Some("jNQXAC9IVRw"));
+        assert_eq!(
+            video_id("https://www.youtube.com/watch?v=jNQXAC9IVRw&t=3s").as_deref(),
+            Some("jNQXAC9IVRw")
+        );
+        assert_eq!(
+            video_id("https://youtu.be/jNQXAC9IVRw?si=x").as_deref(),
+            Some("jNQXAC9IVRw")
+        );
         assert_eq!(video_id("https://example.com"), None);
     }
 
@@ -411,15 +522,29 @@ mod tests {
     #[ignore]
     fn live_pipeline() {
         let t = fetch_transcript("https://www.youtube.com/watch?v=arj7oStGLkU", false).unwrap();
-        assert!(t.words.windows(2).all(|w| w[0].0 <= w[1].0), "단어 시각이 거꾸로 감");
+        assert!(
+            t.words.windows(2).all(|w| w[0].0 <= w[1].0),
+            "단어 시각이 거꾸로 감"
+        );
         let cs = chunks(&t.words, t.end, CHUNK_WORDS);
-        let mut lines = crate::practice::claude::lines_from_transcript(crate::practice::claude::Engine::Claude, &cs[0].text()).unwrap();
+        let mut lines = crate::practice::claude::lines_from_transcript(
+            crate::practice::claude::Engine::Claude,
+            &cs[0].text(),
+        )
+        .unwrap();
         align(&cs[0], &mut lines);
         for l in &lines {
             eprintln!("{:6.2}-{:6.2} {}", l.start, l.end, l.en);
         }
-        assert!(lines.windows(2).all(|w| w[0].start <= w[1].start), "문장 시작이 거꾸로 감");
-        assert!(lines.iter().all(|l| l.start < l.end && l.start >= cs[0].words[0].0 && l.end <= cs[0].end));
+        assert!(
+            lines.windows(2).all(|w| w[0].start <= w[1].start),
+            "문장 시작이 거꾸로 감"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.start < l.end && l.start >= cs[0].words[0].0 && l.end <= cs[0].end)
+        );
     }
 
     // 실제 네트워크 + yt-dlp 필요. `cargo test -- --ignored` 로만 실행.

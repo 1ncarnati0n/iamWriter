@@ -24,9 +24,13 @@ pub struct Player {
 
 impl Player {
     pub fn start() -> Result<Self, String> {
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("플레이어 서버 시작 실패: {e}"))?;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| format!("플레이어 서버 시작 실패: {e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-        let cmd = Arc::new(Mutex::new(Cmd { rate: 1.0, ..Cmd::default() }));
+        let cmd = Arc::new(Mutex::new(Cmd {
+            rate: 1.0,
+            ..Cmd::default()
+        }));
         let shared = cmd.clone();
         std::thread::spawn(move || {
             // 연결마다 스레드 — 브라우저가 미리 열어 두고 요청을 안 보내는 소켓이 다른 요청을 막지 않게
@@ -100,7 +104,8 @@ mod tests {
         assert!(get(p.port, "/").contains("YT.Player"));
         p.play("abc", 10.0, 12.0, 0.75);
         let r = get(p.port, "/cmd");
-        let body: serde_json::Value = serde_json::from_str(r.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(r.split("\r\n\r\n").nth(1).unwrap()).unwrap();
         assert_eq!(body["seq"], 1);
         assert_eq!(body["id"], "abc");
         assert_eq!(body["start"], 9.75);

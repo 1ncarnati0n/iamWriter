@@ -5,9 +5,9 @@ mod theme;
 mod writer;
 
 use iced::{
-    event, keyboard, system, window,
+    Border, Color, Element, Event, Length, Subscription, Task, event, keyboard, system,
     widget::{button, container, row, stack, text},
-    Border, Color, Element, Event, Length, Subscription, Task,
+    window,
 };
 use practice::Practice;
 use theme::{TITLEBAR, UI_FONT};
@@ -62,7 +62,11 @@ impl App {
     }
 
     fn new(writer: Writer) -> Self {
-        Self { mode: Mode::Write, writer, practice: Practice::new() }
+        Self {
+            mode: Mode::Write,
+            writer,
+            practice: Practice::new(),
+        }
     }
 
     fn title(&self) -> String {
@@ -106,35 +110,58 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         let body = match self.mode {
             Mode::Write => self.writer.view().map(Message::Writer),
-            Mode::Practice => self.practice.view(self.writer.palette()).map(Message::Practice),
+            Mode::Practice => self
+                .practice
+                .view(self.writer.palette())
+                .map(Message::Practice),
         };
         // 모드 전환 버튼은 타이틀바 오른쪽에 겹쳐 그린다. 버튼 밖의 타이틀바는 아래 층이 그대로 받아 창 끌기가 된다.
         let content = stack![body, self.mode_switch()];
-        Element::new(command_keys::StripCommandText { inner: content.into() })
+        Element::new(command_keys::StripCommandText {
+            inner: content.into(),
+        })
     }
 
     fn mode_switch(&self) -> Element<'_, Message> {
         let p = self.writer.palette();
         // 집중 글쓰기에서 타이핑하면 상태줄과 함께 흐려진다
-        let alpha = if self.mode == Mode::Write { self.writer.chrome_alpha() } else { 1.0 };
+        let alpha = if self.mode == Mode::Write {
+            self.writer.chrome_alpha()
+        } else {
+            1.0
+        };
         let tab = |label: &'static str, mode: Mode| {
             let on = self.mode == mode;
             button(text(label).size(12))
                 .on_press(Message::Switch(mode))
                 .padding([3, 10])
                 .style(move |_, st| button::Style {
-                    background: (on || st == button::Status::Hovered)
-                        .then(|| Color { a: if on { 0.14 } else { 0.07 } * alpha, ..p.fg }.into()),
-                    text_color: Color { a: alpha, ..if on { p.strong } else { p.muted } },
+                    background: (on || st == button::Status::Hovered).then(|| {
+                        Color {
+                            a: if on { 0.14 } else { 0.07 } * alpha,
+                            ..p.fg
+                        }
+                        .into()
+                    }),
+                    text_color: Color {
+                        a: alpha,
+                        ..if on { p.strong } else { p.muted }
+                    },
                     border: Border::default().rounded(10),
                     ..Default::default()
                 })
         };
-        container(row![tab("집중 글쓰기", Mode::Write), tab("영어 공부", Mode::Practice)].spacing(2))
-            .align_right(Length::Fill)
-            .center_y(TITLEBAR)
-            .padding([0, 12])
-            .into()
+        container(
+            row![
+                tab("집중 글쓰기", Mode::Write),
+                tab("영어 공부", Mode::Practice)
+            ]
+            .spacing(2),
+        )
+        .align_right(Length::Fill)
+        .center_y(TITLEBAR)
+        .padding([0, 12])
+        .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -157,7 +184,15 @@ impl App {
 
 /// ⌘1 집중 글쓰기 · ⌘2 영어 공부. 한글 자판에서도 물리 키 기준으로 읽는다.
 fn switch_keys(event: Event, _status: event::Status, _window: window::Id) -> Option<Message> {
-    let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, physical_key, .. }) = event else { return None };
+    let Event::Keyboard(keyboard::Event::KeyPressed {
+        key,
+        modifiers,
+        physical_key,
+        ..
+    }) = event
+    else {
+        return None;
+    };
     if !modifiers.command() {
         return None;
     }
@@ -173,11 +208,10 @@ fn switch_keys(event: Event, _status: event::Status, _window: window::Id) -> Opt
 mod command_keys {
     use super::Message;
     use iced::advanced::{
-        layout, overlay, renderer,
-        widget::{tree, Operation, Tree, Widget},
-        Clipboard, Layout, Shell,
+        Clipboard, Layout, Shell, layout, overlay, renderer,
+        widget::{Operation, Tree, Widget, tree},
     };
-    use iced::{keyboard, mouse, Element, Event, Length, Rectangle, Size, Vector};
+    use iced::{Element, Event, Length, Rectangle, Size, Vector, keyboard, mouse};
 
     type R = iced::Renderer;
 
@@ -190,7 +224,14 @@ mod command_keys {
 
     /// 글자를 지운 이벤트. 바꿀 게 없으면 None.
     pub(crate) fn strip(event: &Event) -> Option<Event> {
-        let Event::Keyboard(keyboard::Event::KeyPressed { modifiers, text: Some(_), .. }) = event else { return None };
+        let Event::Keyboard(keyboard::Event::KeyPressed {
+            modifiers,
+            text: Some(_),
+            ..
+        }) = event
+        else {
+            return None;
+        };
         if !modifiers.command() {
             return None;
         }
@@ -203,45 +244,103 @@ mod command_keys {
 
     // 상태가 없는 투명한 래퍼: 위젯 트리도 감싼 위젯의 것을 그대로 쓴다.
     impl Widget<Message, iced::Theme, R> for StripCommandText<'_> {
-        fn size(&self) -> Size<Length> { self.inner.as_widget().size() }
-        fn size_hint(&self) -> Size<Length> { self.inner.as_widget().size_hint() }
-        fn tag(&self) -> tree::Tag { self.inner.as_widget().tag() }
-        fn state(&self) -> tree::State { self.inner.as_widget().state() }
-        fn children(&self) -> Vec<Tree> { self.inner.as_widget().children() }
-        fn diff(&self, tree: &mut Tree) { self.inner.as_widget().diff(tree) }
+        fn size(&self) -> Size<Length> {
+            self.inner.as_widget().size()
+        }
+        fn size_hint(&self) -> Size<Length> {
+            self.inner.as_widget().size_hint()
+        }
+        fn tag(&self) -> tree::Tag {
+            self.inner.as_widget().tag()
+        }
+        fn state(&self) -> tree::State {
+            self.inner.as_widget().state()
+        }
+        fn children(&self) -> Vec<Tree> {
+            self.inner.as_widget().children()
+        }
+        fn diff(&self, tree: &mut Tree) {
+            self.inner.as_widget().diff(tree)
+        }
 
-        fn layout(&mut self, tree: &mut Tree, renderer: &R, limits: &layout::Limits) -> layout::Node {
+        fn layout(
+            &mut self,
+            tree: &mut Tree,
+            renderer: &R,
+            limits: &layout::Limits,
+        ) -> layout::Node {
             self.inner.as_widget_mut().layout(tree, renderer, limits)
         }
 
-        fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &R, op: &mut dyn Operation) {
-            self.inner.as_widget_mut().operate(tree, layout, renderer, op);
+        fn operate(
+            &mut self,
+            tree: &mut Tree,
+            layout: Layout<'_>,
+            renderer: &R,
+            op: &mut dyn Operation,
+        ) {
+            self.inner
+                .as_widget_mut()
+                .operate(tree, layout, renderer, op);
         }
 
         fn update(
-            &mut self, tree: &mut Tree, event: &Event, layout: Layout<'_>, cursor: mouse::Cursor,
-            renderer: &R, clipboard: &mut dyn Clipboard, shell: &mut Shell<'_, Message>, viewport: &Rectangle,
+            &mut self,
+            tree: &mut Tree,
+            event: &Event,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            renderer: &R,
+            clipboard: &mut dyn Clipboard,
+            shell: &mut Shell<'_, Message>,
+            viewport: &Rectangle,
         ) {
             let stripped = strip(event);
             let event = stripped.as_ref().unwrap_or(event);
-            self.inner.as_widget_mut().update(tree, event, layout, cursor, renderer, clipboard, shell, viewport);
+            self.inner.as_widget_mut().update(
+                tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+            );
         }
 
         fn draw(
-            &self, tree: &Tree, renderer: &mut R, theme: &iced::Theme, style: &renderer::Style,
-            layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle,
+            &self,
+            tree: &Tree,
+            renderer: &mut R,
+            theme: &iced::Theme,
+            style: &renderer::Style,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            viewport: &Rectangle,
         ) {
-            self.inner.as_widget().draw(tree, renderer, theme, style, layout, cursor, viewport);
+            self.inner
+                .as_widget()
+                .draw(tree, renderer, theme, style, layout, cursor, viewport);
         }
 
-        fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &R) -> mouse::Interaction {
-            self.inner.as_widget().mouse_interaction(tree, layout, cursor, viewport, renderer)
+        fn mouse_interaction(
+            &self,
+            tree: &Tree,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            viewport: &Rectangle,
+            renderer: &R,
+        ) -> mouse::Interaction {
+            self.inner
+                .as_widget()
+                .mouse_interaction(tree, layout, cursor, viewport, renderer)
         }
 
         fn overlay<'b>(
-            &'b mut self, tree: &'b mut Tree, layout: Layout<'b>, renderer: &R, viewport: &Rectangle, translation: Vector,
+            &'b mut self,
+            tree: &'b mut Tree,
+            layout: Layout<'b>,
+            renderer: &R,
+            viewport: &Rectangle,
+            translation: Vector,
         ) -> Option<overlay::Element<'b, Message, iced::Theme, R>> {
-            self.inner.as_widget_mut().overlay(tree, layout, renderer, viewport, translation)
+            self.inner
+                .as_widget_mut()
+                .overlay(tree, layout, renderer, viewport, translation)
         }
     }
 }
@@ -254,7 +353,9 @@ mod tests {
         Event::Keyboard(keyboard::Event::KeyPressed {
             key: keyboard::Key::Character(c.into()),
             modified_key: keyboard::Key::Character(c.into()),
-            physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
             location: keyboard::Location::Standard,
             modifiers,
             text: Some(c.into()),
@@ -268,7 +369,10 @@ mod tests {
         let (writer, _) = Writer::with_path(None);
         let mut app = App::new(writer);
         assert_eq!(app.mode, Mode::Write);
-        assert!(!app.practice.visible, "앱은 집중 글쓰기로 시작하므로 영어 공부는 숨어 있다");
+        assert!(
+            !app.practice.visible,
+            "앱은 집중 글쓰기로 시작하므로 영어 공부는 숨어 있다"
+        );
         let _ = app.update(Message::Switch(Mode::Practice));
         assert!(app.mode == Mode::Practice && app.practice.visible);
         assert_eq!(app.title(), "영어 공부");
@@ -280,11 +384,22 @@ mod tests {
     fn command_keys_switch_modes_and_never_type_text() {
         use keyboard::Modifiers;
         let to = |e: Event| switch_keys(e, event::Status::Ignored, window::Id::unique());
-        assert!(matches!(to(press("1", Modifiers::COMMAND)), Some(Message::Switch(Mode::Write))));
-        assert!(matches!(to(press("2", Modifiers::COMMAND)), Some(Message::Switch(Mode::Practice))));
-        assert!(to(press("2", Modifiers::empty())).is_none(), "⌘ 없는 2 는 그냥 글자");
+        assert!(matches!(
+            to(press("1", Modifiers::COMMAND)),
+            Some(Message::Switch(Mode::Write))
+        ));
+        assert!(matches!(
+            to(press("2", Modifiers::COMMAND)),
+            Some(Message::Switch(Mode::Practice))
+        ));
+        assert!(
+            to(press("2", Modifiers::empty())).is_none(),
+            "⌘ 없는 2 는 그냥 글자"
+        );
         // ⌘ 조합은 글자만 지우고 키는 남긴다. ⌘ 없는 입력은 건드리지 않는다
-        let Some(Event::Keyboard(keyboard::Event::KeyPressed { text, key, .. })) = command_keys::strip(&press("1", Modifiers::COMMAND)) else {
+        let Some(Event::Keyboard(keyboard::Event::KeyPressed { text, key, .. })) =
+            command_keys::strip(&press("1", Modifiers::COMMAND))
+        else {
             panic!("⌘1 은 바뀌어야 한다")
         };
         assert_eq!((text, key), (None, keyboard::Key::Character("1".into())));

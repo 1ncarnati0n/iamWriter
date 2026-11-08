@@ -28,7 +28,11 @@ impl Engine {
     /// 화면에 보여줄 모델 이름.
     pub fn model_label(self) -> String {
         match self {
-            Engine::Claude => CLAUDE_MODEL.lock().unwrap().clone().unwrap_or_else(|| "Haiku (최신)".into()),
+            Engine::Claude => CLAUDE_MODEL
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "Haiku (최신)".into()),
             Engine::Codex => codex_model(),
         }
     }
@@ -42,8 +46,13 @@ fn codex_model() -> String {
 }
 
 fn read_codex_model() -> String {
-    let path = std::env::home_dir().unwrap_or_default().join(".codex/models_cache.json");
-    let v: Value = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let path = std::env::home_dir()
+        .unwrap_or_default()
+        .join(".codex/models_cache.json");
+    let v: Value = std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
     latest_terra(&v).unwrap_or_else(|| CODEX_FALLBACK.into())
 }
 
@@ -52,7 +61,9 @@ fn latest_terra(v: &Value) -> Option<String> {
     v["models"]
         .as_array()?
         .iter()
-        .filter(|m| m["visibility"] == "list" && m["slug"].as_str().is_some_and(|s| s.contains("terra")))
+        .filter(|m| {
+            m["visibility"] == "list" && m["slug"].as_str().is_some_and(|s| s.contains("terra"))
+        })
         .min_by_key(|m| m["priority"].as_i64().unwrap_or(i64::MAX))
         .and_then(|m| m["slug"].as_str().map(String::from))
 }
@@ -76,7 +87,11 @@ pub struct Line {
 impl Line {
     /// "Mia: " 형태의 화자 라벨. 소설이면 빈 문자열.
     pub fn who(&self) -> String {
-        if self.speaker.is_empty() { String::new() } else { format!("{}: ", self.speaker) }
+        if self.speaker.is_empty() {
+            String::new()
+        } else {
+            format!("{}: ", self.speaker)
+        }
     }
 }
 
@@ -99,7 +114,12 @@ pub struct Fix {
     pub why_ko: String,
 }
 
-pub fn generate_lines(engine: Engine, level: &str, chat: bool, topic: &str) -> Result<Vec<Line>, String> {
+pub fn generate_lines(
+    engine: Engine,
+    level: &str,
+    chat: bool,
+    topic: &str,
+) -> Result<Vec<Line>, String> {
     let kind = if chat {
         "a casual chat/messenger conversation between two friends. Put the speaker's first name in `speaker` and only the spoken words in `en` (never include the name or a colon prefix in `en`)"
     } else {
@@ -153,8 +173,14 @@ fn call_lines(engine: Engine, prompt: &str) -> Result<Vec<Line>, String> {
 }
 
 pub fn review_writing(engine: Engine, lines: &[Line], written: &str) -> Result<Review, String> {
-    let ko: Vec<String> = lines.iter().map(|l| format!("{}{}", l.who(), l.ko)).collect();
-    let model: Vec<String> = lines.iter().map(|l| format!("{}{}", l.who(), l.en)).collect();
+    let ko: Vec<String> = lines
+        .iter()
+        .map(|l| format!("{}{}", l.who(), l.ko))
+        .collect();
+    let model: Vec<String> = lines
+        .iter()
+        .map(|l| format!("{}{}", l.who(), l.en))
+        .collect();
     let prompt = format!(
         "A Korean learner translated these Korean lines into English.\n\n\
          Korean:\n{}\n\nReference English:\n{}\n\nLearner's English:\n{}\n\n\
@@ -197,15 +223,35 @@ fn call<T: DeserializeOwned>(engine: Engine, prompt: &str, schema: Value) -> Res
 
 fn call_codex<T: DeserializeOwned>(prompt: &str, schema: Value) -> Result<T, String> {
     // 스키마와 답을 파일로 주고받는다. 호출마다 다른 이름.
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let base = std::env::temp_dir().join(format!("typing_eng_codex_{}_{nanos}", std::process::id()));
-    let (schema_path, out_path) = (base.with_extension("schema.json"), base.with_extension("out.json"));
-    std::fs::write(&schema_path, schema.to_string()).map_err(|e| format!("임시 파일 쓰기 실패: {e}"))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let base =
+        std::env::temp_dir().join(format!("typing_eng_codex_{}_{nanos}", std::process::id()));
+    let (schema_path, out_path) = (
+        base.with_extension("schema.json"),
+        base.with_extension("out.json"),
+    );
+    std::fs::write(&schema_path, schema.to_string())
+        .map_err(|e| format!("임시 파일 쓰기 실패: {e}"))?;
     let run = Command::new("codex")
         .current_dir(std::env::temp_dir())
-        .args(["exec", "-m", &codex_model(), "-c", "model_reasoning_effort=\"low\""])
+        .args([
+            "exec",
+            "-m",
+            &codex_model(),
+            "-c",
+            "model_reasoning_effort=\"low\"",
+        ])
         // 사용자 설정(알림 훅 등)·규칙·세션 기록 없이, 읽기 전용으로
-        .args(["--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "-s", "read-only"])
+        .args([
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "-s",
+            "read-only",
+        ])
         .arg("--output-schema")
         .arg(&schema_path)
         .arg("-o")
@@ -254,14 +300,23 @@ fn call_claude<T: DeserializeOwned>(prompt: &str, schema: Value) -> Result<T, St
     })?;
     // --output-format json 은 결과 객체 하나 또는 이벤트 배열을 준다 → 마지막 "result" 이벤트를 쓴다.
     let result = match &v {
-        Value::Array(events) => events.iter().rev().find(|e| e["type"] == "result").unwrap_or(&Value::Null),
+        Value::Array(events) => events
+            .iter()
+            .rev()
+            .find(|e| e["type"] == "result")
+            .unwrap_or(&Value::Null),
         _ => &v,
     };
     if result["is_error"] == true || result.is_null() {
         let msg = result["result"].as_str().unwrap_or("알 수 없는 오류");
-        return Err(format!("Claude 오류: {msg} (터미널에서 `claude` 로그인 상태를 확인하세요)"));
+        return Err(format!(
+            "Claude 오류: {msg} (터미널에서 `claude` 로그인 상태를 확인하세요)"
+        ));
     }
-    if let Some(m) = result["modelUsage"].as_object().and_then(|m| m.keys().next()) {
+    if let Some(m) = result["modelUsage"]
+        .as_object()
+        .and_then(|m| m.keys().next())
+    {
         *CLAUDE_MODEL.lock().unwrap() = Some(m.clone());
     }
     serde_json::from_value(result["structured_output"].clone())
@@ -289,18 +344,30 @@ mod tests {
     #[ignore]
     fn live_generate_codex() {
         let lines = super::generate_lines(Engine::Codex, "A2", false, "a rainy day").unwrap();
-        assert!(lines.len() >= 5 && lines.iter().all(|l| !l.en.is_empty() && !l.ko.is_empty()), "{lines:?}");
+        assert!(
+            lines.len() >= 5 && lines.iter().all(|l| !l.en.is_empty() && !l.ko.is_empty()),
+            "{lines:?}"
+        );
     }
 
     #[test]
     #[ignore]
     fn live_generate() {
         let lines = super::generate_lines(Engine::Claude, "A2", true, "ordering coffee").unwrap();
-        assert!(Engine::Claude.model_label().contains("haiku"), "{}", Engine::Claude.model_label());
+        assert!(
+            Engine::Claude.model_label().contains("haiku"),
+            "{}",
+            Engine::Claude.model_label()
+        );
         assert!(lines.len() >= 5, "{lines:?}");
         assert!(lines.iter().all(|l| !l.en.is_empty() && !l.ko.is_empty()));
         // 대화형: 화자 이름이 분리되고 대사에 "이름:" 접두가 남지 않아야 한다
         assert!(lines.iter().all(|l| !l.speaker.is_empty()), "{lines:?}");
-        assert!(lines.iter().all(|l| !l.en.starts_with(&format!("{}:", l.speaker))), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|l| !l.en.starts_with(&format!("{}:", l.speaker))),
+            "{lines:?}"
+        );
     }
 }

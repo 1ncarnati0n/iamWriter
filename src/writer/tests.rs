@@ -18,8 +18,17 @@ fn atomic_save_preserves_original_on_failure() {
 fn search_uses_utf8_columns() {
     let hits = search_matches("한글 test\r\n다시 한글", "한글");
     assert_eq!(hits.len(), 2);
-    assert_eq!(hits[1].position, text_editor::Position { line: 1, column: 13 });
-    assert_eq!(hits[1].selection, Some(text_editor::Position { line: 1, column: 7 }));
+    assert_eq!(
+        hits[1].position,
+        text_editor::Position {
+            line: 1,
+            column: 13
+        }
+    );
+    assert_eq!(
+        hits[1].selection,
+        Some(text_editor::Position { line: 1, column: 7 })
+    );
     assert!(search_matches("abc", "").is_empty());
     assert!(search_matches("abc", "z").is_empty());
 }
@@ -109,7 +118,7 @@ fn measured_width_scales_with_font_size() {
 #[cfg(unix)]
 #[test]
 fn atomic_save_preserves_symlink_and_mode_and_rejects_readonly() {
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::{PermissionsExt, symlink};
     let dir = std::env::temp_dir().join(format!("iamwriter-link-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("note.md");
@@ -120,7 +129,10 @@ fn atomic_save_preserves_symlink_and_mode_and_rejects_readonly() {
     atomic_save(&link, "수정").unwrap();
     assert!(link.is_symlink());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "수정");
-    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o640);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
     assert!(atomic_save(&path, "덮어쓰기").is_err());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "수정");
@@ -143,8 +155,12 @@ fn new_document_clears_path_and_history() {
 fn selected_text_replacement_undo_restores_selection() {
     let (mut writer, _) = Writer::with_path(None);
     writer.set_text("한글 문서");
-    writer.content.move_to(search_matches("한글 문서", "한글")[0]);
-    writer.edit(text_editor::Action::Edit(text_editor::Edit::Paste(std::sync::Arc::new("새 글".into()))));
+    writer
+        .content
+        .move_to(search_matches("한글 문서", "한글")[0]);
+    writer.edit(text_editor::Action::Edit(text_editor::Edit::Paste(
+        std::sync::Arc::new("새 글".into()),
+    )));
     writer.undo_redo(false);
     assert_eq!(writer.content.text().trim_end(), "한글 문서");
     assert_eq!(writer.content.selection().as_deref(), Some("한글"));
@@ -154,12 +170,33 @@ fn selected_text_replacement_undo_restores_selection() {
 fn search_highlight_keeps_markdown_and_marks_current_result() {
     use iced::advanced::text::Highlighter;
     let p = Theme::Light.palette();
-    let faces = Faces { regular: Font::DEFAULT, bold: Font { weight: font::Weight::Bold, ..Font::DEFAULT }, italic: Font::DEFAULT, bold_italic: Font::DEFAULT };
-    let settings = HlSettings { p, faces, focus: None, found: Some(search_matches("# 한글 제목", "한글")[0]) };
+    let faces = Faces {
+        regular: Font::DEFAULT,
+        bold: Font {
+            weight: font::Weight::Bold,
+            ..Font::DEFAULT
+        },
+        italic: Font::DEFAULT,
+        bold_italic: Font::DEFAULT,
+    };
+    let settings = HlSettings {
+        p,
+        faces,
+        focus: None,
+        found: Some(search_matches("# 한글 제목", "한글")[0]),
+    };
     let mut highlighter = Markdown::new(&settings);
     let spans: Vec<_> = highlighter.highlight_line("# 한글 제목").collect();
-    assert!(spans.iter().any(|(range, style)| range == &(2..8) && style.color == p.accent));
-    assert!(spans.iter().any(|(range, style)| range.end == "# 한글 제목".len() && style.color == p.strong));
+    assert!(
+        spans
+            .iter()
+            .any(|(range, style)| range == &(2..8) && style.color == p.accent)
+    );
+    assert!(
+        spans
+            .iter()
+            .any(|(range, style)| range.end == "# 한글 제목".len() && style.color == p.strong)
+    );
 }
 
 #[test]
@@ -178,13 +215,24 @@ fn compare_focus_preparation() {
     for _ in 0..100 {
         assert_eq!(std::hint::black_box(para_lines(&content, at)), (at, at + 1));
     }
-    eprintln!("21,001 lines / 100 iterations: full copy {:?}, local paragraph {:?}", before, start.elapsed());
+    eprintln!(
+        "21,001 lines / 100 iterations: full copy {:?}, local paragraph {:?}",
+        before,
+        start.elapsed()
+    );
 }
 
 fn key_press(key: keyboard::Key, modifiers: keyboard::Modifiers) -> text_editor::KeyPress {
-    text_editor::KeyPress { modified_key: key.clone(), key,
-        physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
-        modifiers, text: None, status: text_editor::Status::Focused { is_hovered: false } }
+    text_editor::KeyPress {
+        modified_key: key.clone(),
+        key,
+        physical_key: keyboard::key::Physical::Unidentified(
+            keyboard::key::NativeCode::Unidentified,
+        ),
+        modifiers,
+        text: None,
+        status: text_editor::Status::Focused { is_hovered: false },
+    }
 }
 
 #[test]
@@ -192,14 +240,33 @@ fn mac_delete_bindings_remove_to_line_or_word_boundary_and_undo() {
     use keyboard::{Key, Modifiers, key::Named};
     use text_editor::{Binding, Motion};
     for (key, modifiers, motion, expected) in [
-        (Named::Backspace, Modifiers::COMMAND, Motion::Home, "\n다음 줄"),
-        (Named::Backspace, Modifiers::ALT, Motion::WordLeft, "hello \n다음 줄"),
+        (
+            Named::Backspace,
+            Modifiers::COMMAND,
+            Motion::Home,
+            "\n다음 줄",
+        ),
+        (
+            Named::Backspace,
+            Modifiers::ALT,
+            Motion::WordLeft,
+            "hello \n다음 줄",
+        ),
     ] {
-        let Some(Binding::Custom(message)) = editor_binding(key_press(Key::Named(key), modifiers)) else { panic!("missing delete binding") };
+        let Some(Binding::Custom(message)) = editor_binding(key_press(Key::Named(key), modifiers))
+        else {
+            panic!("missing delete binding")
+        };
         assert!(matches!(&message, Message::DeleteTo(m) if *m == motion));
         let (mut writer, _) = Writer::with_path(None);
         writer.set_text("hello world\n다음 줄");
-        writer.content.move_to(text_editor::Cursor { position: text_editor::Position { line: 0, column: 11 }, selection: None });
+        writer.content.move_to(text_editor::Cursor {
+            position: text_editor::Position {
+                line: 0,
+                column: 11,
+            },
+            selection: None,
+        });
         let _ = writer.update(message);
         assert_eq!(writer.content.text().trim_end(), expected);
         writer.undo_redo(false);
@@ -211,7 +278,9 @@ fn mac_delete_bindings_remove_to_line_or_word_boundary_and_undo() {
 fn formatting_toggles_selection_and_keeps_one_undo_step() {
     let (mut writer, _) = Writer::with_path(None);
     writer.set_text("한글 문장");
-    writer.content.move_to(search_matches("한글 문장", "한글")[0]);
+    writer
+        .content
+        .move_to(search_matches("한글 문장", "한글")[0]);
     writer.format_selection("**");
     assert_eq!(writer.content.text().trim_end(), "**한글** 문장");
     assert_eq!(writer.content.selection().as_deref(), Some("한글"));
@@ -221,24 +290,38 @@ fn formatting_toggles_selection_and_keeps_one_undo_step() {
     assert_eq!(writer.content.text().trim_end(), "**한글** 문장");
     writer.undo_redo(false);
     assert_eq!(writer.content.text().trim_end(), "한글 문장");
-    writer.content.move_to(text_editor::Cursor { position: text_editor::Position { line: 0, column: 0 }, selection: None });
+    writer.content.move_to(text_editor::Cursor {
+        position: text_editor::Position { line: 0, column: 0 },
+        selection: None,
+    });
     writer.format_selection("*");
     assert_eq!(writer.content.cursor().position.column, 1);
 }
 
 #[test]
 fn markdown_combined_emphasis_and_underscore_bold() {
-    for (input, expected) in [("***한글***", Kind::BoldItalic), ("___한글___", Kind::BoldItalic), ("__한글__", Kind::Bold)] {
+    for (input, expected) in [
+        ("***한글***", Kind::BoldItalic),
+        ("___한글___", Kind::BoldItalic),
+        ("__한글__", Kind::Bold),
+    ] {
         let spans = inline_spans(input);
         assert_eq!(spans[1].1, expected);
         assert_eq!(&input[spans[1].0.clone()], "한글");
     }
-    assert!(inline_spans("\\*기호\\*").iter().all(|(_, k)| *k == Kind::Plain));
+    assert!(
+        inline_spans("\\*기호\\*")
+            .iter()
+            .all(|(_, k)| *k == Kind::Plain)
+    );
 }
 
 #[test]
 fn korean_italic_glyphs_use_synthetic_slant_without_changing_family() {
-    use iced::advanced::graphics::text::{to_attributes, cosmic_text::{Buffer, Metrics, Shaping, CacheKeyFlags}};
+    use iced::advanced::graphics::text::{
+        cosmic_text::{Buffer, CacheKeyFlags, Metrics, Shaping},
+        to_attributes,
+    };
     let faces = faces_of("Apple SD Gothic Neo");
     let attrs = to_attributes(faces.italic);
     assert!(attrs.cache_key_flags.contains(CacheKeyFlags::FAKE_ITALIC));
@@ -250,25 +333,56 @@ fn korean_italic_glyphs_use_synthetic_slant_without_changing_family() {
     buffer.shape_until_scroll(system, false);
     let glyphs: Vec<_> = buffer.layout_runs().flat_map(|r| r.glyphs.iter()).collect();
     assert!(!glyphs.is_empty());
-    assert!(glyphs.iter().all(|g| g.glyph_id != 0 && g.cache_key_flags.contains(CacheKeyFlags::FAKE_ITALIC)));
+    assert!(
+        glyphs
+            .iter()
+            .all(|g| g.glyph_id != 0 && g.cache_key_flags.contains(CacheKeyFlags::FAKE_ITALIC))
+    );
     let italic_key = glyphs[0].physical((0.0, 0.0), 1.0).cache_key;
-    buffer.set_text(system, "한글 Italic", &to_attributes(faces.regular), Shaping::Advanced, None);
+    buffer.set_text(
+        system,
+        "한글 Italic",
+        &to_attributes(faces.regular),
+        Shaping::Advanced,
+        None,
+    );
     buffer.shape_until_scroll(system, false);
-    let regular_key = buffer.layout_runs().next().unwrap().glyphs[0].physical((0.0, 0.0), 1.0).cache_key;
+    let regular_key = buffer.layout_runs().next().unwrap().glyphs[0]
+        .physical((0.0, 0.0), 1.0)
+        .cache_key;
     let mut cache = iced::advanced::graphics::text::cosmic_text::SwashCache::new();
-    let italic_pixels = cache.get_image(system, italic_key).as_ref().unwrap().data.clone();
-    let regular_pixels = cache.get_image(system, regular_key).as_ref().unwrap().data.clone();
+    let italic_pixels = cache
+        .get_image(system, italic_key)
+        .as_ref()
+        .unwrap()
+        .data
+        .clone();
+    let regular_pixels = cache
+        .get_image(system, regular_key)
+        .as_ref()
+        .unwrap()
+        .data
+        .clone();
     assert_ne!(italic_pixels, regular_pixels);
 }
 
 #[test]
 fn bold_hangul_and_latin_use_bold_faces() {
-    use iced::advanced::graphics::text::{to_attributes, cosmic_text::{Buffer, Metrics, Shaping}};
+    use iced::advanced::graphics::text::{
+        cosmic_text::{Buffer, Metrics, Shaping},
+        to_attributes,
+    };
     let faces = faces_of("Menlo");
     let mut system = font_system().write().unwrap();
     let system = system.raw();
     let mut buffer = Buffer::new(system, Metrics::new(18.0, 28.0));
-    buffer.set_text(system, "한글 Bold", &to_attributes(faces.bold), Shaping::Advanced, None);
+    buffer.set_text(
+        system,
+        "한글 Bold",
+        &to_attributes(faces.bold),
+        Shaping::Advanced,
+        None,
+    );
     buffer.shape_until_scroll(system, false);
     for glyph in buffer.layout_runs().flat_map(|r| r.glyphs.iter()) {
         assert!(system.db().face(glyph.font_id).unwrap().weight.0 >= 600);
@@ -278,5 +392,8 @@ fn bold_hangul_and_latin_use_bold_faces() {
 #[test]
 fn single_weight_korean_font_has_visible_bold_fallback() {
     let faces = faces_of("AppleMyungjo");
-    assert!(matches!(faces.bold.weight, font::Weight::Semibold | font::Weight::Bold | font::Weight::ExtraBold | font::Weight::Black));
+    assert!(matches!(
+        faces.bold.weight,
+        font::Weight::Semibold | font::Weight::Bold | font::Weight::ExtraBold | font::Weight::Black
+    ));
 }

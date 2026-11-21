@@ -27,6 +27,146 @@ impl Chunk {
     }
 }
 
+/// 골라 둔 영어 영상 하나
+pub struct Pick {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub channel: &'static str,
+    pub len: &'static str,
+    /// 어떤 영상인지 한국어 한 줄
+    pub note: &'static str,
+}
+
+const fn pick(
+    id: &'static str,
+    title: &'static str,
+    channel: &'static str,
+    len: &'static str,
+    note: &'static str,
+) -> Pick {
+    Pick {
+        id,
+        title,
+        channel,
+        len,
+        note,
+    }
+}
+
+/// 자막과 함께 보며 공부할 영상 (분야, 영상들). 모두 yt-dlp 로 제목 · 임베드 가능 여부를 확인했다(2026-11-21).
+// ponytail: 고정 목록. 영상을 바꾸려면 여기에 한 줄. 사용자가 직접 늘리는 목록은 "링크로 보기"가 맡는다.
+pub const CURATED: &[(&str, &[Pick])] = &[
+    (
+        "개발 · AI",
+        &[
+            pick(
+                "AJpK3YTTKZ4",
+                "Introducing Claude Code",
+                "Anthropic",
+                "3:55",
+                "짧고 또렷한 제품 소개 — 처음 보기 좋음",
+            ),
+            pick(
+                "gv0WHhKelSE",
+                "Claude Code best practices",
+                "Anthropic",
+                "25:53",
+                "실제로 쓰는 프롬프트 표현이 많이 나옴",
+            ),
+            pick(
+                "6eBSHbLKuN0",
+                "Mastering Claude Code in 30 minutes",
+                "Anthropic",
+                "28:07",
+                "워크플로 시연 — 개발 영어 듣기",
+            ),
+            pick(
+                "5C_HPTJg5ek",
+                "Rust in 100 Seconds",
+                "Fireship",
+                "2:29",
+                "아주 빠른 말 — 0.75배로 도전",
+            ),
+            pick(
+                "aircAruvnKk",
+                "But what is a neural network?",
+                "3Blue1Brown",
+                "18:40",
+                "천천히 또박또박 설명하는 영어",
+            ),
+            pick(
+                "wjZofJX0v4M",
+                "Transformers, the tech behind LLMs",
+                "3Blue1Brown",
+                "27:14",
+                "LLM 원리를 그림과 함께",
+            ),
+            pick(
+                "zjkBMFhNj_g",
+                "Intro to Large Language Models",
+                "Andrej Karpathy",
+                "59:48",
+                "긴 강연 — 여러 번 나눠 보기",
+            ),
+        ],
+    ),
+    (
+        "TED · 강연",
+        &[
+            pick(
+                "arj7oStGLkU",
+                "Inside the Mind of a Master Procrastinator",
+                "TED · Tim Urban",
+                "14:04",
+                "유머 많은 쉬운 강연",
+            ),
+            pick(
+                "qp0HIF3SfI4",
+                "How Great Leaders Inspire Action",
+                "TED · Simon Sinek",
+                "18:35",
+                "같은 표현을 반복해 듣기 쉬움",
+            ),
+            pick(
+                "rrkrvAUbU9Y",
+                "The puzzle of motivation",
+                "TED · Dan Pink",
+                "18:37",
+                "또렷한 발음의 설득형 강연",
+            ),
+            pick(
+                "iG9CE55wbtY",
+                "Do schools kill creativity?",
+                "TED · Ken Robinson",
+                "20:03",
+                "영국 영어 · 농담이 많음",
+            ),
+            pick(
+                "UF8uR6Z6KLc",
+                "2005 Stanford Commencement Address",
+                "Stanford · Steve Jobs",
+                "15:04",
+                "천천히 읽는 연설 — 받아쓰기에도 좋음",
+            ),
+        ],
+    ),
+    (
+        "이야기",
+        &[pick(
+            "h6fcK_fRYaI",
+            "The Egg - A Short Story",
+            "Kurzgesagt",
+            "8:06",
+            "짧은 단편 낭독 — 이야기 영어",
+        )],
+    ),
+];
+
+/// 영상 ID → 유튜브 주소
+pub fn watch_url(id: &str) -> String {
+    format!("https://www.youtube.com/watch?v={id}")
+}
+
 #[derive(Clone, Debug)]
 pub struct Transcript {
     pub id: String,
@@ -528,7 +668,7 @@ mod tests {
         );
         let cs = chunks(&t.words, t.end, CHUNK_WORDS);
         let mut lines = crate::practice::claude::lines_from_transcript(
-            crate::practice::claude::Engine::Claude,
+            &crate::practice::claude::Engine::Claude.with_model(None),
             &cs[0].text(),
         )
         .unwrap();

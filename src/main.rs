@@ -1,36 +1,41 @@
 // iamWriter — 집중 글쓰기 + 영어 공부 (iced)
-// 한 창에 두 모드. ⌘1 집중 글쓰기 · ⌘2 영어 공부. 설계: docs/TYPINGENG_PORT.md
+// 메인 창 하나에 두 모드(⌘1 집중 글쓰기 · ⌘2 영어 공부) + 따로 뜨는 설정 창(⌘,). 설계: docs/TYPINGENG_PORT.md
 mod practice;
 mod theme;
 mod writer;
 
 use iced::{
-    Border, Color, Element, Event, Length, Subscription, Task, event, keyboard, system,
-    widget::{button, container, row, stack, text},
+    Border, Center, Color, Element, Event, Fill, Length, Padding, Subscription, Task, event,
+    keyboard, system,
+    widget::{Column, button, column, container, row, scrollable, stack, text},
     window,
 };
 use practice::Practice;
-use theme::{TITLEBAR, UI_FONT};
+use theme::{Palette, TITLEBAR, UI_FONT};
 use writer::Writer;
 
 fn main() -> iced::Result {
-    iced::application(App::boot, App::update, App::view)
+    // daemon: 창을 여러 개 띄울 수 있다. 창을 직접 열고(boot), 메인 창을 닫을 때 직접 끝낸다(iced::exit).
+    iced::daemon(App::boot, App::update, App::view)
         .title(App::title)
         .theme(App::theme)
         .default_font(UI_FONT)
         .subscription(App::subscription)
-        .exit_on_close_request(false) // 닫기 가드를 직접 처리
-        .window(window::Settings {
-            size: iced::Size::new(1000.0, 760.0),
-            #[cfg(target_os = "macos")]
-            platform_specific: window::settings::PlatformSpecific {
-                title_hidden: true,
-                titlebar_transparent: true,
-                fullsize_content_view: true, // 본문 배경이 타이틀바 뒤까지
-            },
-            ..Default::default()
-        })
         .run()
+}
+
+fn main_window() -> window::Settings {
+    window::Settings {
+        size: iced::Size::new(1000.0, 760.0),
+        exit_on_close_request: false, // 닫기 가드를 직접 처리
+        #[cfg(target_os = "macos")]
+        platform_specific: window::settings::PlatformSpecific {
+            title_hidden: true,
+            titlebar_transparent: true,
+            fullsize_content_view: true, // 본문 배경이 타이틀바 뒤까지
+        },
+        ..Default::default()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,11 +46,36 @@ enum Mode {
     Practice,
 }
 
-/// 앱 셸: 두 모드의 상태를 들고 메시지를 감싸서 전달만 한다.
+/// 설정 창 왼쪽의 분류
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Pane {
+    Look,
+    Write,
+    Practice,
+    Keys,
+}
+
+impl Pane {
+    const ALL: [Pane; 4] = [Pane::Look, Pane::Write, Pane::Practice, Pane::Keys];
+    fn label(self) -> &'static str {
+        match self {
+            Pane::Look => "화면",
+            Pane::Write => "집중 글쓰기",
+            Pane::Practice => "영어 공부",
+            Pane::Keys => "단축키",
+        }
+    }
+}
+
+/// 앱 셸: 두 모드의 상태를 들고 메시지를 감싸서 전달만 한다. 창은 메인 + (열려 있으면) 설정.
 struct App {
     mode: Mode,
     writer: Writer,
     practice: Practice,
+    settings: Option<window::Id>,
+    pane: Pane,
+    /// 설정 창에 포커스가 있으면 모드의 키보드 구독을 끈다(Tab = 건너뛰기, Esc = 그만하기가 설정 창에서 동작하지 않게)
+    settings_focused: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -53,12 +83,26 @@ enum Message {
     Writer(writer::Message),
     Practice(practice::Msg),
     Switch(Mode),
+    OpenSettings,
+    Pane(Pane),
+    CloseRequested(window::Id),
+    Focused(window::Id),
+    /// Esc · ⌘W 를 누른 창
+    CloseKey(window::Id),
 }
 
 impl App {
     fn boot() -> (Self, Task<Message>) {
         let (writer, task) = Writer::boot();
-        (Self::new(writer), task.map(Message::Writer))
+        // 메인 창은 처음 연 창이라 window::oldest() 로 찾는다(끌기 · 확대)
+        let (_, open) = window::open(main_window());
+        let mut app = Self::new(writer);
+        // API 키가 있으면 Claude 모델 목록을 실시간으로 (백그라운드)
+        let models = app.practice.load_models().map(Message::Practice);
+        (
+            app,
+            Task::batch([open.discard(), task.map(Message::Writer), models]),
+        )
     }
 
     fn new(writer: Writer) -> Self {
@@ -66,28 +110,81 @@ impl App {
             mode: Mode::Write,
             writer,
             practice: Practice::new(),
+            settings: None,
+            pane: Pane::Write,
+            settings_focused: false,
         }
     }
 
-    fn title(&self) -> String {
+    fn title(&self, id: window::Id) -> String {
+        if Some(id) == self.settings {
+            return "설정".into();
+        }
         match self.mode {
             Mode::Write => self.writer.title(),
             Mode::Practice => self.practice.title(),
         }
     }
 
-    /// 테마는 하나: 집중 글쓰기 설정의 테마를 두 모드가 같이 쓴다.
-    fn theme(&self) -> iced::Theme {
+    /// 테마는 하나: 집중 글쓰기 설정의 테마를 두 모드와 설정 창이 같이 쓴다.
+    fn theme(&self, _id: window::Id) -> iced::Theme {
         self.writer.theme()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            // 두 모드의 "설정" 버튼은 설정 창을 연다
+            Message::Writer(writer::Message::ToggleSettings)
+            | Message::Practice(practice::Msg::ToggleSettings)
+            | Message::OpenSettings => self.open_settings(),
             Message::Writer(m) => self.writer.update(m).map(Message::Writer),
             // 숨어 있는 동안 도착한 AI·유튜브 결과도 여기로 온다. 포커스·재생은 Practice 가 visible 일 때만 한다.
             Message::Practice(m) => self.practice.update(m).map(Message::Practice),
             Message::Switch(mode) => self.switch(mode),
+            Message::Pane(p) => {
+                self.pane = p;
+                Task::none()
+            }
+            Message::Focused(id) => {
+                self.settings_focused = Some(id) == self.settings;
+                Task::none()
+            }
+            Message::CloseKey(id) if Some(id) == self.settings => self.close_settings(),
+            Message::CloseKey(_) => Task::none(),
+            Message::CloseRequested(id) if Some(id) == self.settings => self.close_settings(),
+            // 메인 창을 닫으면 앱을 끝낸다. 영어 공부 모드에서 닫아도 저장 안 된 글을 확인한다.
+            Message::CloseRequested(_) => {
+                if self.writer.may_close() {
+                    iced::exit()
+                } else {
+                    Task::none()
+                }
+            }
         }
+    }
+
+    /// 열려 있으면 앞으로 가져오고, 없으면 지금 모드의 분류로 연다.
+    fn open_settings(&mut self) -> Task<Message> {
+        if let Some(id) = self.settings {
+            return window::gain_focus(id);
+        }
+        self.pane = match self.mode {
+            Mode::Write => Pane::Write,
+            Mode::Practice => Pane::Practice,
+        };
+        let (id, open) = window::open(window::Settings {
+            size: iced::Size::new(760.0, 600.0),
+            min_size: Some(iced::Size::new(560.0, 420.0)),
+            exit_on_close_request: false,
+            ..Default::default()
+        });
+        self.settings = Some(id);
+        open.discard()
+    }
+
+    fn close_settings(&mut self) -> Task<Message> {
+        self.settings_focused = false;
+        self.settings.take().map_or(Task::none(), window::close)
     }
 
     /// 모드를 바꾸면 위젯 트리가 새로 만들어져 포커스가 사라지므로 직접 되돌린다.
@@ -107,19 +204,102 @@ impl App {
         }
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        let body = match self.mode {
-            Mode::Write => self.writer.view().map(Message::Writer),
-            Mode::Practice => self
-                .practice
-                .view(self.writer.palette())
-                .map(Message::Practice),
+    fn view(&self, id: window::Id) -> Element<'_, Message> {
+        let content = if Some(id) == self.settings {
+            self.settings_view()
+        } else {
+            let body = match self.mode {
+                Mode::Write => self.writer.view().map(Message::Writer),
+                Mode::Practice => self
+                    .practice
+                    .view(self.writer.palette())
+                    .map(Message::Practice),
+            };
+            // 모드 전환 버튼은 타이틀바 오른쪽에 겹쳐 그린다. 버튼 밖의 타이틀바는 아래 층이 그대로 받아 창 끌기가 된다.
+            stack![body, self.mode_switch()].into()
         };
-        // 모드 전환 버튼은 타이틀바 오른쪽에 겹쳐 그린다. 버튼 밖의 타이틀바는 아래 층이 그대로 받아 창 끌기가 된다.
-        let content = stack![body, self.mode_switch()];
-        Element::new(command_keys::StripCommandText {
-            inner: content.into(),
+        Element::new(command_keys::StripCommandText { inner: content })
+    }
+
+    /// 설정 창: 왼쪽 분류, 오른쪽 내용. 바꾸면 바로 저장되고 메인 창에 바로 보인다.
+    fn settings_view(&self) -> Element<'_, Message> {
+        let p = self.writer.palette();
+        let nav = Column::with_children(Pane::ALL.map(|pane| {
+            let on = self.pane == pane;
+            button(text(pane.label()).size(14))
+                .width(Fill)
+                .padding([7, 12])
+                .on_press(Message::Pane(pane))
+                .style(move |_, st| button::Style {
+                    background: (on || st == button::Status::Hovered).then(|| {
+                        Color {
+                            a: if on { 0.12 } else { 0.06 },
+                            ..p.fg
+                        }
+                        .into()
+                    }),
+                    text_color: if on { p.strong } else { p.fg },
+                    border: Border::default().rounded(8),
+                    ..Default::default()
+                })
+                .into()
+        }))
+        .spacing(2);
+        let (title, desc, body): (&str, &str, Element<'_, Message>) = match self.pane {
+            Pane::Look => (
+                "화면",
+                "테마는 두 모드와 이 창이 같이 씁니다. 자동은 macOS 다크 모드를 따라갑니다. ⇧⌘D 로 순환.",
+                self.writer.settings_theme().map(Message::Writer),
+            ),
+            Pane::Write => (
+                "집중 글쓰기",
+                "본문 글꼴 · 크기 · 줄간격 · 본문 폭 · 포커스 모드",
+                self.writer.settings_editor().map(Message::Writer),
+            ),
+            Pane::Practice => (
+                "영어 공부",
+                "AI 엔진 · 유튜브 · 따라치기와 첨삭에 쓰는 글꼴",
+                self.practice.settings_view(p).map(Message::Practice),
+            ),
+            Pane::Keys => ("단축키", "", shortcuts(p)),
+        };
+        let content = scrollable(
+            column![
+                column![
+                    text(title).size(22).color(p.strong),
+                    text(desc).size(13).color(p.muted)
+                ]
+                .spacing(4),
+                body
+            ]
+            .spacing(24)
+            .padding(Padding {
+                top: 24.0,
+                bottom: 32.0,
+                left: 28.0,
+                right: 28.0,
+            }),
+        )
+        .width(Fill)
+        .height(Fill);
+        container(row![
+            container(nav)
+                .width(180)
+                .height(Fill)
+                .padding(12)
+                .style(move |_| container::Style {
+                    background: Some(p.panel.into()),
+                    ..Default::default()
+                }),
+            content
+        ])
+        .style(move |_| container::Style {
+            background: Some(p.bg.into()),
+            ..Default::default()
         })
+        .width(Fill)
+        .height(Fill)
+        .into()
     }
 
     fn mode_switch(&self) -> Element<'_, Message> {
@@ -165,40 +345,101 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        // 키보드 구독은 보이는 모드 하나만: Tab 이 글쓰기에선 포커스 이동, 영어 공부에선 건너뛰기라 둘 다 켜면 함께 동작한다
-        let mode = match self.mode {
-            Mode::Write => self.writer.subscription().map(Message::Writer),
-            Mode::Practice => self.practice.subscription().map(Message::Practice),
+        // 키보드 구독은 보이는 모드 하나만: Tab 이 글쓰기에선 포커스 이동, 영어 공부에선 건너뛰기라 둘 다 켜면 함께 동작한다.
+        // 설정 창에 포커스가 있으면 둘 다 끈다.
+        let mode = match (self.settings_focused, self.mode) {
+            (true, _) => Subscription::none(),
+            (_, Mode::Write) => self.writer.subscription().map(Message::Writer),
+            (_, Mode::Practice) => self.practice.subscription().map(Message::Practice),
         };
         Subscription::batch([
             mode,
-            event::listen_with(switch_keys),
-            // 모드와 상관없이 항상. exit_on_close_request(false) 라서 이게 없으면 창이 닫히지 않는다.
-            // 영어 공부 모드에서 닫아도 저장 안 된 글을 확인한다.
+            event::listen_with(app_keys),
+            // exit_on_close_request(false) 라서 이게 없으면 창이 닫히지 않는다.
             // map 의 클로저는 아무것도 캡처하면 안 된다(iced 가 컴파일 단계에서 검사).
-            window::close_requests().map(|id| Message::Writer(writer::Message::CloseRequested(id))),
+            window::close_requests().map(Message::CloseRequested),
             system::theme_changes().map(|m| Message::Writer(writer::Message::SystemMode(m))),
         ])
     }
 }
 
-/// ⌘1 집중 글쓰기 · ⌘2 영어 공부. 한글 자판에서도 물리 키 기준으로 읽는다.
-fn switch_keys(event: Event, _status: event::Status, _window: window::Id) -> Option<Message> {
-    let Event::Keyboard(keyboard::Event::KeyPressed {
-        key,
-        modifiers,
-        physical_key,
-        ..
-    }) = event
-    else {
-        return None;
-    };
-    if !modifiers.command() {
-        return None;
-    }
-    match key.to_latin(physical_key) {
-        Some('1') => Some(Message::Switch(Mode::Write)),
-        Some('2') => Some(Message::Switch(Mode::Practice)),
+/// 설정 창의 단축키 안내
+const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "공통",
+        &[
+            ("⌘1 / ⌘2", "집중 글쓰기 / 영어 공부"),
+            ("⌘,", "설정 창"),
+            ("Esc · ⌘W", "설정 창 닫기 (설정 창에서)"),
+        ],
+    ),
+    (
+        "집중 글쓰기",
+        &[
+            ("⌘N · ⌘O", "새 글 · 열기"),
+            ("⌘S / ⇧⌘S", "저장 / 다른 이름으로 저장"),
+            ("⌘Z / ⇧⌘Z", "실행 취소 / 다시 실행"),
+            ("⌘B / ⌘I", "굵게 / 기울임"),
+            ("⌘⌫ / ⌥⌫", "줄 앞 / 이전 단어까지 삭제"),
+            ("⌘F", "문서 찾기 (Enter 다음 · ⇧Enter 이전)"),
+            ("⇧⌘F", "포커스 모드"),
+            ("⇧⌘D", "테마 순환"),
+        ],
+    ),
+    (
+        "영어 공부",
+        &[
+            (
+                "Enter",
+                "줄 끝까지 친 뒤 다음 줄 (유튜브: 빈 칸에서 다시 듣기)",
+            ),
+            ("Tab", "지금 줄 건너뛰기 (기록 제외)"),
+            ("Esc", "오류 닫기 → 따라치기 그만하기"),
+        ],
+    ),
+];
+
+fn shortcuts<'a>(p: Palette) -> Element<'a, Message> {
+    Column::with_children(SHORTCUTS.iter().map(|&(group, keys)| {
+        column![
+            text(group).size(14).color(p.strong),
+            Column::with_children(keys.iter().map(|&(k, what)| {
+                row![
+                    text(k).size(13).width(120).color(p.fg),
+                    text(what).size(13).color(p.muted)
+                ]
+                .align_y(Center)
+                .into()
+            }))
+            .spacing(6)
+        ]
+        .spacing(8)
+        .into()
+    }))
+    .spacing(24)
+    .into()
+}
+
+/// 앱 단축키(⌘1 · ⌘2 · ⌘,)와 창 포커스 · Esc/⌘W. 한글 자판에서도 물리 키 기준으로 읽는다.
+fn app_keys(event: Event, _status: event::Status, window: window::Id) -> Option<Message> {
+    match event {
+        Event::Window(window::Event::Focused) => Some(Message::Focused(window)),
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            ..
+        }) => Some(Message::CloseKey(window)),
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            modifiers,
+            physical_key,
+            ..
+        }) if modifiers.command() => match key.to_latin(physical_key) {
+            Some('1') => Some(Message::Switch(Mode::Write)),
+            Some('2') => Some(Message::Switch(Mode::Practice)),
+            Some(',') => Some(Message::OpenSettings),
+            Some('w') => Some(Message::CloseKey(window)),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -375,15 +616,40 @@ mod tests {
         );
         let _ = app.update(Message::Switch(Mode::Practice));
         assert!(app.mode == Mode::Practice && app.practice.visible);
-        assert_eq!(app.title(), "영어 공부");
+        assert_eq!(app.title(window::Id::unique()), "영어 공부");
         let _ = app.update(Message::Switch(Mode::Write));
         assert!(app.mode == Mode::Write && !app.practice.visible);
     }
 
     #[test]
+    fn settings_window_closes_alone_and_mutes_mode_keys() {
+        let (writer, _) = Writer::with_path(None);
+        let mut app = App::new(writer);
+        let _ = app.update(Message::Switch(Mode::Practice));
+        let _ = app.update(Message::Practice(practice::Msg::ToggleSettings));
+        let id = app.settings.expect("설정 버튼은 설정 창을 연다");
+        assert_eq!(app.pane, Pane::Practice, "지금 모드의 분류로 연다");
+        let _ = app.update(Message::OpenSettings);
+        assert_eq!(app.settings, Some(id), "이미 열려 있으면 새로 열지 않는다");
+        assert_eq!(app.title(id), "설정");
+
+        let _ = app.update(Message::Focused(id));
+        assert!(
+            app.settings_focused,
+            "설정 창에선 Tab · Esc 가 모드로 가지 않는다"
+        );
+        // 다른 창의 Esc 는 설정 창을 닫지 않는다
+        let _ = app.update(Message::CloseKey(window::Id::unique()));
+        assert_eq!(app.settings, Some(id));
+        // 설정 창 닫기는 저장 확인 없이 그 창만 (메인 창은 그대로, 모드도 그대로)
+        let _ = app.update(Message::CloseRequested(id));
+        assert!(app.settings.is_none() && !app.settings_focused && app.mode == Mode::Practice);
+    }
+
+    #[test]
     fn command_keys_switch_modes_and_never_type_text() {
         use keyboard::Modifiers;
-        let to = |e: Event| switch_keys(e, event::Status::Ignored, window::Id::unique());
+        let to = |e: Event| app_keys(e, event::Status::Ignored, window::Id::unique());
         assert!(matches!(
             to(press("1", Modifiers::COMMAND)),
             Some(Message::Switch(Mode::Write))

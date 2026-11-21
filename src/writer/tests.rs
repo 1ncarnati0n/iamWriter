@@ -93,10 +93,6 @@ fn settings_and_search_shortcuts_do_not_undo_body() {
     let (mut writer, _) = Writer::with_path(None);
     writer.edit(text_editor::Action::Edit(text_editor::Edit::Insert('한')));
     let before = writer.content.text();
-    writer.show_settings = true;
-    let _ = writer.update(Message::Shortcut("z".into(), false));
-    assert_eq!(writer.content.text(), before);
-    writer.show_settings = false;
     writer.show_find = true;
     let _ = writer.update(Message::Shortcut("z".into(), false));
     assert_eq!(writer.content.text(), before);

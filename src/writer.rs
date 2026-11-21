@@ -8,8 +8,8 @@ use iced::{
     event, font, keyboard, mouse, system,
     time::{Duration, Instant},
     widget::{
-        button, column, container, mouse_area, opaque, row, scrollable, slider, space, stack, text,
-        text_editor, text_input, toggler,
+        button, column, container, mouse_area, row, scrollable, slider, space, text, text_editor,
+        text_input, toggler,
     },
     window,
 };
@@ -687,7 +687,6 @@ pub(crate) enum Message {
     Focus(bool),
     Reset,
     SystemMode(iced::theme::Mode),
-    CloseRequested(window::Id),
     Drag,
     Maximize,
     DismissNotice,
@@ -716,7 +715,6 @@ pub(crate) struct Writer {
     curated: Vec<(&'static str, Vec<FontItem>)>,
     font_hangul: bool, // 고른 본문 글꼴이 한글을 직접 갖고 있는지
     font_query: String,
-    show_settings: bool,
     system_dark: bool,
     chrome: Animation<bool>,
     now: Instant,
@@ -773,7 +771,6 @@ impl Writer {
             curated: Vec::new(),
             font_hangul: false,
             font_query: String::new(),
-            show_settings: false,
             system_dark: true,
             chrome: Animation::new(true).duration(Duration::from_millis(250)),
             now,
@@ -1011,15 +1008,9 @@ impl Writer {
         self.edit_group = 0;
     }
 
-    fn toggle_settings(&mut self) -> Task<Message> {
-        self.show_settings ^= true;
-        self.show_find = false;
-        self.chrome.go_mut(true, self.now);
-        iced::widget::operation::focus(if self.show_settings {
-            "font-search"
-        } else {
-            "editor"
-        })
+    /// 창 닫기 확인: 저장 안 된 글이 있으면 묻는다. 닫아도 되면 true.
+    pub(crate) fn may_close(&mut self) -> bool {
+        !self.dirty || self.confirm_discard()
     }
 
     fn undo_redo(&mut self, redo: bool) {
@@ -1043,8 +1034,7 @@ impl Writer {
         let before = self.settings.clone();
         let mut task = Task::none();
         match msg {
-            Message::Edit(a) if !self.show_settings => self.edit(a),
-            Message::Edit(_) => {}
+            Message::Edit(a) => self.edit(a),
             Message::DeleteTo(motion) => {
                 let original = self.content.cursor();
                 if original.selection.is_none() {
@@ -1071,25 +1061,21 @@ impl Writer {
                         self.path = None;
                         self.notice = None;
                         self.show_find = false;
-                        self.show_settings = false;
                         task = iced::widget::operation::focus("editor");
                     }
                 }
-                (",", _) => task = self.toggle_settings(),
                 ("f", false) => {
                     self.show_find = true;
-                    self.show_settings = false;
                     self.refresh_matches();
                     self.chrome.go_mut(true, self.now);
                     task = iced::widget::operation::focus("document-search");
                 }
-                ("z", s) if !self.show_settings && !self.show_find => self.undo_redo(s),
+                ("z", s) if !self.show_find => self.undo_redo(s),
                 ("f", true) => self.settings.focus ^= true,
                 ("d", true) => self.settings.theme = self.settings.theme.next(),
                 _ => {}
             },
             Message::Escape | Message::CloseFind => {
-                self.show_settings = false;
                 self.show_find = false;
                 task = iced::widget::operation::focus("editor");
             }
@@ -1109,13 +1095,11 @@ impl Writer {
                 };
             }
             // 방해 없는 화면: 타이핑하면 숨기고, 마우스를 움직이면 보인다
-            Message::Typed if !self.show_settings && !self.show_find => {
-                self.chrome.go_mut(false, self.now)
-            }
+            Message::Typed if !self.show_find => self.chrome.go_mut(false, self.now),
             Message::Typed => {}
             Message::Moved => self.chrome.go_mut(true, self.now),
             Message::Tick => {}
-            Message::ToggleSettings => task = self.toggle_settings(),
+            Message::ToggleSettings => {} // 앱 셸(main.rs)이 설정 창을 연다
             Message::FontQuery(q) => self.font_query = q,
             Message::PickFont(f) => self.settings.font = f,
             Message::Size(v) => self.settings.size = v,
@@ -1125,13 +1109,8 @@ impl Writer {
             Message::Focus(v) => self.settings.focus = v,
             Message::Reset => self.settings = Settings::default(),
             Message::SystemMode(m) => self.system_dark = m == iced::theme::Mode::Dark,
-            Message::CloseRequested(id) => {
-                if !self.dirty || self.confirm_discard() {
-                    task = window::close(id);
-                }
-            }
-            Message::Drag => task = window::latest().and_then(window::drag),
-            Message::Maximize => task = window::latest().and_then(window::toggle_maximize),
+            Message::Drag => task = window::oldest().and_then(window::drag),
+            Message::Maximize => task = window::oldest().and_then(window::toggle_maximize),
             Message::DismissNotice => self.notice = None,
         }
         if self.settings != before {
@@ -1168,7 +1147,7 @@ impl Writer {
                         .map(|c| c.to_string())
                         .unwrap_or_else(|| c.to_lowercase());
                     (status == event::Status::Ignored
-                        || matches!(key.as_str(), "," | "s" | "o" | "n" | "f"))
+                        || matches!(key.as_str(), "s" | "o" | "n" | "f"))
                     .then_some(Message::Shortcut(key, modifiers.shift()))
                 }
                 _ if modifiers.command() => None,
@@ -1338,27 +1317,41 @@ impl Writer {
             })
             .width(Length::Fill)
             .height(Length::Fill);
-
-        if !self.show_settings {
-            return main.into();
-        }
-        // 설정: 오른쪽 위에 떠 있는 카드
-        let card = container(opaque(
-            scrollable(self.settings_card(p))
-                .height(Length::Fill)
-                .width(320),
-        ))
-        .align_right(Length::Fill)
-        .padding(Padding {
-            top: TITLEBAR + 8.0,
-            right: 16.0,
-            bottom: 48.0,
-            left: 0.0,
-        });
-        stack![main, card].into()
+        main.into()
     }
 
-    fn settings_card(&self, p: Palette) -> Element<'_, Message> {
+    /// 설정 창의 "테마" (두 모드 공용)
+    pub(crate) fn settings_theme(&self) -> Element<'_, Message> {
+        let (p, s) = (self.palette(), &self.settings);
+        row(Theme::ALL.iter().map(|&(t, name)| {
+            let on = s.theme == t;
+            button(text(name).size(13))
+                .on_press(Message::SetTheme(t))
+                .padding([6, 14])
+                .style(move |_, _| button::Style {
+                    background: Some(
+                        if on {
+                            p.accent
+                        } else {
+                            Color { a: 0.08, ..p.fg }
+                        }
+                        .into(),
+                    ),
+                    text_color: if on { p.bg } else { p.fg },
+                    border: Border::default().rounded(14),
+                    ..Default::default()
+                })
+                .into()
+        }))
+        .spacing(6)
+        .wrap()
+        .vertical_spacing(6)
+        .into()
+    }
+
+    /// 설정 창의 "집중 글쓰기": 글꼴 · 크기 · 줄간격 · 본문 폭 · 포커스 모드
+    pub(crate) fn settings_editor(&self) -> Element<'_, Message> {
+        let p = self.palette();
         let s = &self.settings;
         let label = |t| text(t).size(12).color(p.fg);
         let q = self.font_query.to_lowercase();
@@ -1427,30 +1420,6 @@ impl Writer {
         };
         let list = column(list).spacing(1);
 
-        let themes = row(Theme::ALL.iter().map(|&(t, name)| {
-            let on = s.theme == t;
-            button(text(name).size(12))
-                .on_press(Message::SetTheme(t))
-                .padding([4, 8])
-                .style(move |_, _| button::Style {
-                    background: Some(
-                        if on {
-                            p.accent
-                        } else {
-                            Color { a: 0.08, ..p.fg }
-                        }
-                        .into(),
-                    ),
-                    text_color: if on { p.bg } else { p.fg },
-                    border: Border::default().rounded(12),
-                    ..Default::default()
-                })
-                .into()
-        }))
-        .spacing(4)
-        .wrap()
-        .vertical_spacing(4); // 한글 이름이 길어도 카드 밖으로 넘치지 않게
-
         let slider_row = |name: &'static str, value: String, s: Element<'static, Message>| {
             column![
                 row![
@@ -1463,32 +1432,68 @@ impl Writer {
             .spacing(4)
         };
 
-        container(column![
-            row![text("설정").size(16).color(p.strong), space::horizontal(), button("닫기 · Esc").on_press(Message::ToggleSettings).style(button::text)],
-            label("글꼴"),
-            text(current).size(18).font(self.faces.regular).color(p.strong),
-            text("다람쥐 헌 쳇바퀴에 타고파 · The quick brown fox").size(14).font(self.faces.regular).color(p.fg),
-            text(if self.font_hangul { "한글 포함 글꼴" } else { "이 글꼴엔 한글이 없어 한글은 시스템 글꼴로 표시돼요" }).size(11).color(p.fg),
-            text(if self.faces.bold.family != self.faces.regular.family { "굵은 면이 없어 강조는 시스템 Bold 글꼴로 표시돼요" } else { "강조는 Bold · 기울임은 동일 글꼴의 합성 기울임" }).size(11).color(p.fg),
-            text_input("모든 글꼴에서 검색…", &self.font_query).id("font-search").on_input(Message::FontQuery).size(13).padding(6),
-            scrollable(list).height(220).spacing(6),
-            slider_row("크기", format!("{:.0}", s.size), slider(12.0..=32.0, s.size, Message::Size).step(1.0_f32).into()),
-            slider_row("줄간격", format!("{:.2}", s.line), slider(1.2..=2.4, s.line, Message::Line).step(0.05_f32).into()),
-            slider_row("본문 폭 (0 너비 기준)", s.measure.to_string(), slider(40..=100, s.measure, Message::Measure).into()),
-            label("테마"),
-            themes,
-            toggler(s.focus).label("포커스 모드  ⇧⌘F").on_toggle(Message::Focus).size(16).text_size(13),
-            text("⌘1 집중 글쓰기 · ⌘2 영어 공부\n⌘N 새 글 · ⌘O 열기 · ⌘S 저장\n⌘F 찾기 · Enter 다음 · ⇧Enter 이전\n⌘B 굵게 · ⌘I 기울임 · ⌘, 설정\n⌘삭제 줄 앞 삭제 · ⌥삭제 단어 삭제\n⌘Z 취소 · ⇧⌘Z 다시").size(12).color(p.fg),
-            button(text("기본값으로").size(12)).on_press(Message::Reset).style(button::text),
-        ].spacing(10))
+        container(
+            column![
+                label("글꼴"),
+                text(current)
+                    .size(18)
+                    .font(self.faces.regular)
+                    .color(p.strong),
+                text("다람쥐 헌 쳇바퀴에 타고파 · The quick brown fox")
+                    .size(14)
+                    .font(self.faces.regular)
+                    .color(p.fg),
+                text(if self.font_hangul {
+                    "한글 포함 글꼴"
+                } else {
+                    "이 글꼴엔 한글이 없어 한글은 시스템 글꼴로 표시돼요"
+                })
+                .size(11)
+                .color(p.fg),
+                text(if self.faces.bold.family != self.faces.regular.family {
+                    "굵은 면이 없어 강조는 시스템 Bold 글꼴로 표시돼요"
+                } else {
+                    "강조는 Bold · 기울임은 동일 글꼴의 합성 기울임"
+                })
+                .size(11)
+                .color(p.fg),
+                text_input("모든 글꼴에서 검색…", &self.font_query)
+                    .id("font-search")
+                    .on_input(Message::FontQuery)
+                    .size(13)
+                    .padding(6),
+                scrollable(list).height(220).spacing(6),
+                slider_row(
+                    "크기",
+                    format!("{:.0}", s.size),
+                    slider(12.0..=32.0, s.size, Message::Size)
+                        .step(1.0_f32)
+                        .into()
+                ),
+                slider_row(
+                    "줄간격",
+                    format!("{:.2}", s.line),
+                    slider(1.2..=2.4, s.line, Message::Line)
+                        .step(0.05_f32)
+                        .into()
+                ),
+                slider_row(
+                    "본문 폭 (0 너비 기준)",
+                    s.measure.to_string(),
+                    slider(40..=100, s.measure, Message::Measure).into()
+                ),
+                toggler(s.focus)
+                    .label("포커스 모드  ⇧⌘F")
+                    .on_toggle(Message::Focus)
+                    .size(16)
+                    .text_size(13),
+                button(text("기본값으로 (테마 포함)").size(12))
+                    .on_press(Message::Reset)
+                    .style(button::text),
+            ]
+            .spacing(10),
+        )
         .width(Length::Fill)
-        .padding(18)
-        .style(move |_| container::Style {
-            background: Some(p.panel.into()),
-            border: Border::default().rounded(12).width(1).color(Color { a: 0.08, ..p.fg }),
-            shadow: iced::Shadow { color: Color { a: 0.25, ..Color::BLACK }, offset: iced::Vector::new(0.0, 8.0), blur_radius: 24.0 },
-            ..Default::default()
-        })
         .into()
     }
 }

@@ -13,6 +13,11 @@ pub(crate) enum Theme {
     Sepia,
     Dark,
     Night,
+    TokyoNight,
+    TokyoLight,
+    /// Anthropic 브랜드 색: 아이보리 #faf9f5 · 잉크 #141413 · 주황 #d97757
+    Anthropic,
+    AnthropicDark,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -40,12 +45,16 @@ impl Palette {
 }
 
 impl Theme {
-    pub(crate) const ALL: [(Theme, &'static str); 5] = [
+    pub(crate) const ALL: [(Theme, &'static str); 9] = [
         (Theme::Auto, "자동"),
         (Theme::Light, "라이트"),
         (Theme::Sepia, "세피아"),
         (Theme::Dark, "다크"),
         (Theme::Night, "나이트"),
+        (Theme::TokyoNight, "Tokyo Night"),
+        (Theme::TokyoLight, "Tokyo Night Light"),
+        (Theme::Anthropic, "Anthropic"),
+        (Theme::AnthropicDark, "Anthropic 다크"),
     ];
 
     pub(crate) fn resolve(self, system_dark: bool) -> Theme {
@@ -115,6 +124,55 @@ impl Theme {
                 code: c(200, 160, 230),
                 ok: dark_ok,
                 bad: dark_bad,
+            },
+            // Tokyo Night 팔레트 (folke/tokyonight). 보조 글자는 대비 3:1 을 넘기려고 원래 comment 색보다 밝게
+            Theme::TokyoNight => Palette {
+                bg: c(26, 27, 38),        // #1a1b26
+                panel: c(36, 40, 59),     // #24283b
+                fg: c(169, 177, 214),     // #a9b1d6
+                strong: c(192, 202, 245), // #c0caf5
+                dim: c(59, 66, 97),       // #3b4261
+                muted: c(115, 122, 162),  // #737aa2
+                accent: c(122, 162, 247), // #7aa2f7
+                code: c(187, 154, 247),   // #bb9af7
+                ok: c(158, 206, 106),     // #9ece6a
+                bad: c(247, 118, 142),    // #f7768e
+            },
+            Theme::TokyoLight => Palette {
+                bg: c(213, 214, 219),    // #d5d6db
+                panel: c(233, 233, 237), // #e9e9ed
+                fg: c(52, 59, 88),       // #343b58
+                strong: c(15, 15, 20),
+                dim: c(150, 153, 163), // #9699a3
+                muted: c(90, 94, 110),
+                accent: c(52, 84, 138), // #34548a
+                code: c(90, 74, 120),   // #5a4a78
+                ok: c(72, 94, 48),      // #485e30
+                bad: c(140, 67, 81),    // #8c4351
+            },
+            Theme::Anthropic => Palette {
+                bg: c(250, 249, 245), // #faf9f5
+                panel: c(240, 238, 230),
+                fg: c(61, 61, 58),
+                strong: c(20, 20, 19), // #141413
+                dim: c(176, 174, 165), // #b0aea5
+                muted: c(120, 118, 110),
+                accent: c(201, 100, 66), // #d97757 을 조금 진하게 (흰 바탕 버튼 글자 대비)
+                code: c(70, 110, 160),   // 파랑 #6a9bcc 계열
+                ok: c(95, 115, 70),      // 초록 #788c5d 계열
+                bad: c(190, 60, 50),
+            },
+            Theme::AnthropicDark => Palette {
+                bg: c(20, 20, 19), // #141413
+                panel: c(34, 33, 30),
+                fg: c(232, 230, 220),     // #e8e6dc
+                strong: c(250, 249, 245), // #faf9f5
+                dim: c(74, 73, 69),
+                muted: c(176, 174, 165), // #b0aea5
+                accent: c(217, 119, 87), // #d97757
+                code: c(106, 155, 204),  // #6a9bcc
+                ok: c(150, 172, 120),
+                bad: c(232, 128, 110),
             },
         }
     }

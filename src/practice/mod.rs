@@ -1,5 +1,6 @@
 // 영어 공부 모드 — typingEng(따라치기 + 영작 첨삭) 이식
-// 원본: github.com/1ncarnati0n/typingEng. 원본과 달라진 곳은 docs/TYPINGENG_PORT.md 5장 목록뿐이다.
+// 원본: github.com/1ncarnati0n/typingEng. 이식하며 달라진 곳은 docs/TYPINGENG_PORT.md 5장,
+// 이식 뒤 새로 넣은 기능(다시 쓰기 · 오류 유형 · 복습)은 같은 문서 11장에 있다.
 mod claude;
 mod player;
 mod store;
@@ -7,22 +8,27 @@ mod typing;
 mod youtube;
 
 use crate::theme::{Palette, TITLEBAR, UI_FONT};
-use claude::{Engine, Line, Review};
+use claude::{Engine, Kind, Line, Review};
 use iced::widget::{
-    Column, button, column, container, mouse_area, operation, progress_bar, rich_text, row,
-    scrollable, space, span, text, text_editor, text_input,
+    Column, button, column, container, mouse_area, opaque, operation, progress_bar, rich_text, row,
+    scrollable, space, span, stack, text, text_editor, text_input,
 };
 use iced::{
     Border, Center, Color, Element, Event, Fill, Font, Padding, Shadow, Subscription, Task, Vector,
 };
 use iced::{event, keyboard, window};
 use player::Player;
+use std::collections::HashMap;
 use std::time::Instant;
-use store::{Lesson, Library, Stats, Video};
+use store::{Lesson, Library, Stats, Video, today};
 use typing::CharState;
 
 const LEVELS: [&str; 4] = ["A1", "A2", "B1", "B2"];
 const INPUT_ID: &str = "typing";
+const WRITE_ID: &str = "writing";
+const SCROLL_ID: &str = "practice-scroll";
+/// 한 번에 복습할 문장 수 (직접 쓰기 한 화면 분량)
+const REVIEW_MAX: usize = 10;
 
 /// (그룹 이름, [(패밀리 이름, 보여줄 이름)]). 같은 글꼴의 다른 패밀리 이름은 같은 라벨로 묶는다.
 type FontGroup = (&'static str, &'static [(&'static str, &'static str)]);
@@ -169,6 +175,14 @@ pub(crate) struct Practice {
     total_chars: usize,
     editor: text_editor::Content,
     review: Option<Review>,
+    /// 다시 쓰기 중이면 처음 쓴 글과 그 첨삭. 이때 editor·review 는 다시 쓴 글의 것.
+    draft: Option<(String, Review)>,
+    /// 복습 중이면 지금 lines 가 온 복습 카드 번호(lines 와 같은 순서). 비었으면 보통 연습.
+    review_cards: Vec<usize>,
+    /// 설정 카드(AI 엔진 · 유튜브 쿠키 · 글꼴)가 열려 있는지
+    show_settings: bool,
+    /// "정말 삭제?"를 묻고 있는 보관함 항목
+    confirm_delete: Option<Del>,
     /// 작업 중이면 안내 문구
     busy: Option<String>,
     error: Option<String>,
@@ -195,6 +209,11 @@ pub(crate) enum Msg {
     Edit(text_editor::Action),
     AskReview,
     Reviewed(Result<Review, String>),
+    StartRewrite,
+    StartReview,
+    ToggleSettings,
+    AskDelete(Del),
+    CancelDelete,
     Home,
     YtUrl(String),
     YtLoad,
@@ -216,6 +235,13 @@ pub(crate) enum Msg {
     Engine(Engine),
     EnFont(&'static str),
     KoFont(&'static str),
+}
+
+/// 보관함에서 지울 항목
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Del {
+    Video(String),
+    Lesson(usize),
 }
 
 /// claude / yt-dlp 호출은 블로킹이라 별도 스레드에서 돌리고 결과만 future로 받는다.
@@ -252,6 +278,10 @@ impl Practice {
             total_chars: 0,
             editor: text_editor::Content::new(),
             review: None,
+            draft: None,
+            review_cards: vec![],
+            show_settings: false,
+            confirm_delete: None,
             busy: None,
             error: None,
             yt_url: String::new(),
@@ -277,7 +307,7 @@ impl Practice {
         pick_font(&self.fonts.1, &self.stats.ko_font, KO_DEFAULT)
     }
 
-    /// Esc·Tab 만. 창 닫기 · 시스템 테마 구독은 앱 셸(main.rs)이 한다.
+    /// Esc·Tab·⌘, 만. 창 닫기 · 시스템 테마 구독은 앱 셸(main.rs)이 한다.
     pub(crate) fn subscription(&self) -> Subscription<Msg> {
         event::listen_with(|e, _, _| match e {
             Event::Keyboard(keyboard::Event::KeyPressed {
@@ -288,6 +318,15 @@ impl Practice {
                 key: keyboard::Key::Named(keyboard::key::Named::Tab),
                 ..
             }) => Some(Msg::Skip),
+            // ⌘, 설정 — 집중 글쓰기와 같은 키. 한글 자판에서도 물리 키 기준
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                physical_key,
+                modifiers,
+                ..
+            }) if modifiers.command() && key.to_latin(physical_key) == Some(',') => {
+                Some(Msg::ToggleSettings)
+            }
             _ => None,
         })
     }
@@ -338,17 +377,19 @@ impl Practice {
                     self.play_current(); // 빈 칸에서 Enter = 다시 듣기
                 } else if self.typed.chars().count() >= self.lines[self.idx].en.chars().count() {
                     self.finish_line(false);
-                    if self.screen == Screen::Typing {
-                        self.play_current(); // 다음 문장 재생
+                    if self.screen == Screen::Writing {
+                        return self.show_writing();
                     }
+                    self.play_current(); // 다음 문장 재생
                 }
             }
             Msg::Skip => {
                 if self.screen == Screen::Typing && self.busy.is_none() {
                     self.finish_line(true);
-                    if self.screen == Screen::Typing {
-                        self.play_current();
+                    if self.screen == Screen::Writing {
+                        return self.show_writing();
                     }
+                    self.play_current();
                     return operation::focus(INPUT_ID);
                 }
             }
@@ -378,13 +419,42 @@ impl Practice {
             Msg::Reviewed(res) => {
                 self.busy = None;
                 match res {
-                    Ok(r) => self.review = Some(r),
+                    Ok(r) => {
+                        // 처음 쓴 글의 첨삭만 기록·복습 일정에 넣는다 (다시 쓴 글은 연습이라 두 번 세지 않는다)
+                        if self.draft.is_none() {
+                            self.record(&r);
+                        }
+                        self.review = Some(r);
+                        return to_top(); // 첨삭 카드는 화면 맨 위에 나온다
+                    }
                     Err(e) => self.error = Some(e),
+                }
+            }
+            Msg::StartRewrite => {
+                if let Some(r) = self.review.take() {
+                    self.draft = Some((self.editor.text(), r));
+                    self.editor = text_editor::Content::new();
+                    return self.show_writing();
+                }
+            }
+            Msg::StartReview => {
+                let cards = self.library.due(today(), REVIEW_MAX);
+                if !cards.is_empty() {
+                    let lines = cards
+                        .iter()
+                        .map(|&i| self.library.deck[i].line.clone())
+                        .collect();
+                    self.cur_video = None;
+                    self.reset(lines);
+                    self.review_cards = cards;
+                    self.screen = Screen::Writing; // 따라치기 없이 바로 영작
+                    return self.show_writing();
                 }
             }
             Msg::Home => {
                 self.screen = Screen::Setup;
                 self.error = None;
+                return to_top();
             }
             Msg::YtUrl(u) => self.yt_url = u,
             Msg::YtLoad => {
@@ -476,13 +546,18 @@ impl Practice {
                     return self.begin(lines);
                 }
             }
+            Msg::ToggleSettings => self.show_settings = !self.show_settings,
+            Msg::AskDelete(d) => self.confirm_delete = Some(d),
+            Msg::CancelDelete => self.confirm_delete = None,
             Msg::DeleteLesson(i) => {
+                self.confirm_delete = None;
                 if i < self.library.lessons.len() {
                     self.library.lessons.remove(i);
                     self.library.save();
                 }
             }
             Msg::DeleteVideo(id) => {
+                self.confirm_delete = None;
                 self.library.videos.retain(|v| v.id != id);
                 self.library.save();
             }
@@ -508,9 +583,14 @@ impl Practice {
             Msg::Drag => return window::latest().and_then(window::drag),
             Msg::Maximize => return window::latest().and_then(window::toggle_maximize),
             Msg::DismissError => self.error = None,
+            // Esc 는 가장 위에 떠 있는 것부터 닫는다: 오류 → 설정 카드 → 따라치기
             Msg::Escape => {
-                if self.error.take().is_none() && self.screen == Screen::Typing {
+                if self.error.take().is_some() {
+                } else if self.show_settings {
+                    self.show_settings = false;
+                } else if self.screen == Screen::Typing {
                     self.screen = Screen::Setup;
+                    return to_top();
                 }
             }
             Msg::Slow(s) => {
@@ -524,6 +604,21 @@ impl Practice {
 
     /// 새 문장 묶음으로 따라치기 시작.
     fn begin(&mut self, lines: Vec<Line>) -> Task<Msg> {
+        self.reset(lines);
+        self.screen = Screen::Typing;
+        Task::batch([to_top(), self.resume()])
+    }
+
+    /// 직접 쓰기 화면을 맨 위부터 보여 주고 편집기에 포커스(보일 때만, resume 과 같은 이유).
+    fn show_writing(&self) -> Task<Msg> {
+        if !self.visible {
+            return to_top();
+        }
+        Task::batch([to_top(), operation::focus(WRITE_ID)])
+    }
+
+    /// 새 문장 묶음을 받고 진행·입력·첨삭 상태를 비운다.
+    fn reset(&mut self, lines: Vec<Line>) {
         self.lines = lines;
         self.idx = 0;
         self.typed.clear();
@@ -531,9 +626,37 @@ impl Practice {
         (self.total_secs, self.total_correct, self.total_chars) = (0.0, 0, 0);
         self.editor = text_editor::Content::new();
         self.review = None;
+        self.draft = None;
+        self.review_cards.clear();
         self.error = None;
-        self.screen = Screen::Typing;
-        self.resume()
+    }
+
+    /// 첫 첨삭 결과를 오류 유형 기록과 복습 일정에 반영.
+    fn record(&mut self, r: &Review) {
+        for f in &r.errors {
+            if f.kind != Kind::Missing {
+                *self
+                    .stats
+                    .error_kinds
+                    .entry(f.kind.key().into())
+                    .or_default() += 1;
+            }
+        }
+        self.stats.save();
+        if self.review_cards.is_empty() {
+            return;
+        }
+        // ponytail: 구두점만 틀린 줄은 맞은 것으로 친다. 더 엄격하게 하려면 이 조건을 뺀다.
+        let failed = |n: usize| {
+            r.errors
+                .iter()
+                .any(|f| f.line == n && f.kind != Kind::Punctuation)
+        };
+        let t = today();
+        for (i, &card) in self.review_cards.iter().enumerate() {
+            self.library.grade(card, !failed(i + 1), t);
+        }
+        self.library.save();
     }
 
     /// 보일 때만: 따라치기 화면이면 현재 문장을 재생하고 입력칸에 포커스.
@@ -592,6 +715,8 @@ impl Practice {
         if self.idx == self.lines.len() {
             self.stats.best_wpm = self.stats.best_wpm.max(self.wpm());
             self.screen = Screen::Writing;
+            self.library.add_to_deck(&self.lines, today());
+            self.library.save();
             if let Some((id, i)) = &self.cur_video
                 && let Some(v) = self.library.video_mut(id)
             {
@@ -629,6 +754,7 @@ impl Practice {
                 format!("{} · 세트 {}/{}", v.title, i + 1, v.chunks.len())
             }
             (Screen::Typing, None) => "AI 문장".to_string(),
+            (Screen::Writing, _) if !self.review_cards.is_empty() => "복습".to_string(),
             (Screen::Writing, _) => "직접 써보기".to_string(),
         }
     }
@@ -660,17 +786,33 @@ impl Practice {
                     right: 32.0,
                 }),
         )
+        .id(SCROLL_ID)
         .height(Fill);
 
-        let main = column![titlebar, body, self.status_bar(p)];
-        container(main)
+        let main = container(column![titlebar, body, self.status_bar(p)])
             .style(move |_| container::Style {
                 background: Some(p.bg.into()),
                 ..Default::default()
             })
             .width(Fill)
-            .height(Fill)
-            .into()
+            .height(Fill);
+        if !self.show_settings {
+            return main.into();
+        }
+        // 설정: 집중 글쓰기와 같은 자리(오른쪽 위)에 떠 있는 카드
+        let settings = container(opaque(
+            scrollable(card(p, self.settings_view(p)))
+                .height(Fill)
+                .width(340),
+        ))
+        .align_right(Fill)
+        .padding(Padding {
+            top: TITLEBAR + 8.0,
+            right: 16.0,
+            bottom: 48.0,
+            left: 0.0,
+        });
+        stack![main, settings].into()
     }
 
     /// 아래 상태줄: 왼쪽은 알림(작업 중·오류), 오른쪽은 화면별 조용한 정보.
@@ -698,12 +840,7 @@ impl Practice {
         );
         let info = |s: String| text(s).size(12).color(p.muted);
         match self.screen {
-            Screen::Setup => {
-                bar = bar.push(info(format!(
-                    "누적 {}줄 · 최고 {:.0} WPM",
-                    self.stats.lines_typed, self.stats.best_wpm
-                )))
-            }
+            Screen::Setup => {}
             Screen::Typing => {
                 let target = &self.lines[self.idx].en;
                 let secs =
@@ -720,12 +857,21 @@ impl Practice {
                             .on_press(Msg::Home),
                     );
             }
+            Screen::Writing if !self.review_cards.is_empty() => {
+                bar = bar.push(info(format!("복습 {}문장", self.lines.len())))
+            }
             Screen::Writing => {
                 bar = bar
                     .push(info(format!("{:.0} WPM", self.wpm())))
                     .push(info(format!("정확도 {:.0}%", self.accuracy())))
             }
         }
+        bar = bar.push(
+            button(text("설정").size(12))
+                .style(quiet(p))
+                .padding([2, 6])
+                .on_press(Msg::ToggleSettings),
+        );
         container(bar)
             .padding(Padding {
                 top: 6.0,
@@ -736,71 +882,82 @@ impl Practice {
             .into()
     }
 
+    /// 처음 화면: 할 일(복습 → 새로 연습) → 보관함 → 기록. 설정은 상태줄의 "설정" 카드로.
     fn setup_view(&self, p: Palette) -> Element<'_, Msg> {
         let (en, ko) = (self.en_font(), self.ko_font());
         let idle = self.busy.is_none();
-        let header = column![
-            text("영어 공부").size(30).color(p.strong),
-            text("따라 치고, 직접 써보며 익히는 영어")
-                .size(14)
-                .color(p.muted),
+        let mut page = column![
+            column![
+                text("영어 공부").size(30).color(p.strong),
+                text("따라 치고, 직접 써보며 익히는 영어")
+                    .size(14)
+                    .color(p.muted),
+            ]
+            .spacing(4)
         ]
-        .spacing(4);
+        .spacing(40);
 
-        // AI 엔진: 문장 생성·자막 정리·첨삭을 어느 CLI로 돌릴지
-        let engines = row([Engine::Claude, Engine::Codex].map(|e| {
-            let on = self.stats.engine == e;
-            button(text(format!("{} · {}", e.name(), e.model_label())).size(13))
-                .style(pill(p, on))
-                .on_press_maybe(idle.then_some(Msg::Engine(e)))
-                .padding([5, 14])
-                .into()
-        }))
-        .spacing(4);
-        let engine = section(
-            p,
-            "AI 엔진",
-            "문장 만들기 · 자막 정리 · 첨삭에 쓸 CLI. Claude는 최신 Haiku, Codex는 최신 Terra 모델로 돌립니다. 터미널에서 미리 로그인해 두세요.",
-            engines,
-        );
+        // 복습: 카드가 생긴 뒤에만. 오늘 할 게 있으면 떠 있는 카드로 눈에 띄게.
+        if !self.library.deck.is_empty() {
+            let t = today();
+            let due = self.library.due(t, usize::MAX).len();
+            if due > 0 {
+                page = page.push(card(
+                    p,
+                    row![
+                        column![
+                            text(format!("오늘 복습할 문장 {due}개"))
+                                .size(18)
+                                .color(p.strong),
+                            text(format!(
+                                "며칠 전에 따라친 문장을 한국어만 보고 다시 써봅니다 · 한 번에 {}문장",
+                                due.min(REVIEW_MAX)
+                            ))
+                            .size(13)
+                            .color(p.muted),
+                        ]
+                        .spacing(4)
+                        .width(Fill),
+                        button(text("복습 시작"))
+                            .style(primary(p))
+                            .on_press_maybe(idle.then_some(Msg::StartReview))
+                            .padding([10, 24]),
+                    ]
+                    .spacing(12)
+                    .align_y(Center),
+                ));
+            } else {
+                let next = self.library.deck.iter().map(|c| c.due).min().unwrap_or(t);
+                page = page.push(
+                    text(format!(
+                        "복습 카드 {}장 · 다음 복습은 {}일 뒤",
+                        self.library.deck.len(),
+                        next.saturating_sub(t)
+                    ))
+                    .size(13)
+                    .color(p.muted),
+                );
+            }
+        }
 
         // 유튜브
-        let cookies = !self.stats.no_yt_cookies;
-        let yt = section(
+        page = page.push(section(
             p,
             "유튜브로 연습",
             "영어 자막(자동 생성 포함)을 문장마다 재생 → 멈춤 → 따라 치기. 플레이어는 브라우저에 열립니다.",
-            column![
-                row![
-                    text_input("https://www.youtube.com/watch?v=…", &self.yt_url)
-                        .on_input(Msg::YtUrl)
-                        .on_submit_maybe(idle.then_some(Msg::YtLoad))
-                        .style(field(p))
-                        .padding(10),
-                    button(text("시작"))
-                        .style(primary(p))
-                        .on_press_maybe(
-                            (idle && !self.yt_url.trim().is_empty()).then_some(Msg::YtLoad)
-                        )
-                        .padding([10, 22]),
-                ]
-                .spacing(8),
-                row![
-                    toggle(
-                        p,
-                        "Chrome 로그인 쿠키 사용",
-                        cookies,
-                        Msg::Cookies(!cookies)
-                    ),
-                    text("YouTube 요청 제한(429)을 피합니다. 처음 한 번 키체인 허용 창이 뜹니다.")
-                        .size(12)
-                        .color(p.muted),
-                ]
-                .spacing(10)
-                .align_y(Center),
+            row![
+                text_input("https://www.youtube.com/watch?v=…", &self.yt_url)
+                    .on_input(Msg::YtUrl)
+                    .on_submit_maybe(idle.then_some(Msg::YtLoad))
+                    .style(field(p))
+                    .padding(10),
+                button(text("시작"))
+                    .style(primary(p))
+                    .on_press_maybe((idle && !self.yt_url.trim().is_empty()).then_some(Msg::YtLoad))
+                    .padding([10, 22]),
             ]
-            .spacing(10),
-        );
+            .spacing(8),
+        ));
 
         // AI 문장
         let levels = row(LEVELS
@@ -817,7 +974,7 @@ impl Practice {
             .on_submit_maybe(idle.then_some(Msg::Generate))
             .style(field(p))
             .padding(10);
-        let ai = section(
+        page = page.push(section(
             p,
             "AI 문장으로 연습",
             "레벨과 주제를 고르면 AI가 8~12줄을 만들어 줍니다.",
@@ -831,13 +988,15 @@ impl Practice {
                     .padding([10, 24]),
             ]
             .spacing(12),
-        );
+        ));
 
         // 보관함
+        let confirming = |d: &Del| self.confirm_delete.as_ref() == Some(d);
         let mut items = Column::new().spacing(2);
         for v in &self.library.videos {
             let n = v.chunks.len();
             let done = v.progress.min(n);
+            let del = Del::Video(v.id.clone());
             items = items.push(library_row(
                 p,
                 format!("▶ {}", v.title),
@@ -851,21 +1010,24 @@ impl Practice {
                     "이어하기"
                 },
                 idle.then(|| Msg::OpenSet(v.id.clone(), resume_set(v))),
-                Msg::DeleteVideo(v.id.clone()),
+                confirming(&del),
+                del,
             ));
         }
         for (i, l) in self.library.lessons.iter().enumerate() {
+            let del = Del::Lesson(i);
             items = items.push(library_row(
                 p,
                 l.title.clone(),
                 format!("AI 문장 · {}줄", l.lines.len()),
                 "열기",
                 idle.then_some(Msg::OpenLesson(i)),
-                Msg::DeleteLesson(i),
+                confirming(&del),
+                del,
             ));
         }
         let empty = self.library.videos.is_empty() && self.library.lessons.is_empty();
-        let library = section(
+        page = page.push(section(
             p,
             "보관함",
             "만든 문장과 영상은 자동 저장됩니다. 다시 열면 AI를 부르지 않고 바로 시작합니다.",
@@ -874,29 +1036,77 @@ impl Practice {
             } else {
                 items.into()
             },
-        );
+        ));
 
+        // 기록: 숫자 · 따라치기 오타 · 첨삭 오류 유형을 한 곳에
+        let joined = |v: Vec<String>| {
+            if v.is_empty() {
+                "아직 없음".to_string()
+            } else {
+                v.join("   ")
+            }
+        };
         let mut missed: Vec<_> = self.stats.missed.iter().collect();
         missed.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-        let missed_line = if missed.is_empty() {
-            "아직 없음".to_string()
-        } else {
+        let missed = joined(
             missed
                 .iter()
                 .take(15)
                 .map(|(w, n)| format!("{w} ×{n}"))
-                .collect::<Vec<_>>()
-                .join("   ")
-        };
-        let record = section(
-            p,
-            "자주 틀린 단어",
-            "",
-            text(missed_line).font(en).size(13).color(p.fg),
+                .collect(),
         );
+        let mut kinds: Vec<_> = self.stats.error_kinds.iter().collect();
+        kinds.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let kinds = joined(
+            kinds
+                .iter()
+                .map(|(k, n)| format!("{} ×{n}", Kind::from_key(k).label()))
+                .collect(),
+        );
+        let stat = |label: &'static str, value: String, font: Font| -> Element<'static, Msg> {
+            row![
+                text(label).size(13).width(72).color(p.muted),
+                text(value).font(font).size(13).color(p.fg)
+            ]
+            .spacing(12)
+            .into()
+        };
+        let totals = format!(
+            "누적 {}줄 · 최고 {:.0} WPM",
+            self.stats.lines_typed, self.stats.best_wpm
+        );
+        page = page.push(section(
+            p,
+            "기록",
+            "",
+            column![
+                stat("따라치기", totals, UI_FONT),
+                stat("틀린 단어", missed, en),
+                stat("실수 유형", kinds, ko),
+            ]
+            .spacing(10),
+        ));
+        page.into()
+    }
 
-        // 글꼴: 영문(따라치기·입력·작문)과 한글(뜻·첨삭 설명)을 따로. 버튼 글자가 그 글꼴로 미리 보인다.
-        // 설치 안 된 글꼴은 흐리게, 누를 수 없게
+    /// 설정 카드: AI 엔진 · 유튜브 · 글꼴. 바꾸면 바로 저장된다.
+    fn settings_view(&self, p: Palette) -> Element<'_, Msg> {
+        let (en, ko) = (self.en_font(), self.ko_font());
+        let idle = self.busy.is_none();
+        let small = |t: &'static str| text(t).size(12).color(p.muted);
+        let heading = |t: &'static str| text(t).size(14).color(p.strong);
+
+        let engines = Column::with_children([Engine::Claude, Engine::Codex].map(|e| {
+            button(text(format!("{} · {}", e.name(), e.model_label())).size(13))
+                .style(pill(p, self.stats.engine == e))
+                .on_press_maybe(idle.then_some(Msg::Engine(e)))
+                .padding([5, 14])
+                .into()
+        }))
+        .spacing(4);
+        let cookies = !self.stats.no_yt_cookies;
+
+        // 글꼴 버튼 글자가 그 글꼴로 미리 보인다. 설치 안 된 글꼴은 흐리게, 누를 수 없게
         let choices = |groups: &[(&'static str, Vec<FontItem>)],
                        cur: Font,
                        msg: fn(&'static str) -> Msg|
@@ -927,33 +1137,51 @@ impl Practice {
             .spacing(10)
             .into()
         };
-        let fonts = section(
-            p,
-            "글꼴",
-            "흐린 글꼴은 설치하면 고를 수 있습니다. 같은 계열(명조↔세리프, 고딕↔산세리프)끼리 짝지으면 잘 어울립니다. 메뉴·버튼은 Apple SD Gothic Neo로 고정.",
+
+        column![
+            row![
+                text("설정").size(16).color(p.strong),
+                space::horizontal(),
+                button(text("닫기 · Esc").size(12))
+                    .style(quiet(p))
+                    .padding([2, 6])
+                    .on_press(Msg::ToggleSettings),
+            ]
+            .align_y(Center),
             column![
-                text("영문 — 따라치기 · 입력 · 작문")
-                    .size(12)
-                    .color(p.muted),
+                heading("AI 엔진"),
+                small("문장 만들기 · 자막 정리 · 첨삭에 씁니다. 터미널에서 미리 로그인해 두세요."),
+                engines,
+            ]
+            .spacing(6),
+            column![
+                heading("유튜브"),
+                toggle(p, "Chrome 로그인 쿠키 사용", cookies, Msg::Cookies(!cookies)),
+                small("YouTube 요청 제한(429)을 피합니다. 처음 한 번 키체인 허용 창이 뜹니다."),
+            ]
+            .spacing(6),
+            column![
+                heading("영문 글꼴 — 따라치기 · 입력 · 작문"),
                 choices(&self.fonts.0, en, Msg::EnFont),
                 text("The quick brown fox jumps over the lazy dog.")
                     .font(en)
-                    .size(18)
-                    .color(p.strong),
-                space::vertical().height(6),
-                text("한글 — 뜻 · 첨삭 설명").size(12).color(p.muted),
-                choices(&self.fonts.1, ko, Msg::KoFont),
-                text("다람쥐 헌 쳇바퀴에 타고파")
-                    .font(ko)
-                    .size(18)
+                    .size(16)
                     .color(p.strong),
             ]
             .spacing(8),
-        );
-
-        column![header, engine, yt, ai, library, record, fonts]
-            .spacing(40)
-            .into()
+            column![
+                heading("한글 글꼴 — 뜻 · 첨삭 설명"),
+                choices(&self.fonts.1, ko, Msg::KoFont),
+                text("다람쥐 헌 쳇바퀴에 타고파")
+                    .font(ko)
+                    .size(16)
+                    .color(p.strong),
+                small("흐린 글꼴은 설치하면 고를 수 있습니다. 명조↔세리프, 고딕↔산세리프끼리 짝지으면 잘 어울립니다."),
+            ]
+            .spacing(8),
+        ]
+        .spacing(22)
+        .into()
     }
 
     fn typing_view(&self, p: Palette) -> Element<'_, Msg> {
@@ -1079,19 +1307,33 @@ impl Practice {
         column![progress, done, current].spacing(28).into()
     }
 
+    /// 직접 쓰기: 처음 쓰기 → 첨삭 → (교정문 가리고) 다시 쓰기 → 다시 첨삭 + 비교.
     fn writing_view(&self, p: Palette) -> Element<'_, Msg> {
         let (en, ko) = (self.en_font(), self.ko_font());
         let idle = self.busy.is_none();
-        let summary = column![
-            text("따라치기 완료").size(26).color(p.strong),
-            text(format!(
-                "{:.0} WPM · 정확도 {:.0}%",
-                self.wpm(),
-                self.accuracy()
-            ))
-            .size(14)
-            .color(p.muted),
-        ]
+        let reviewing = !self.review_cards.is_empty();
+        let summary = if reviewing {
+            column![
+                text("복습").size(26).color(p.strong),
+                text(format!(
+                    "며칠 전에 따라친 {}문장입니다. 한국어만 보고 영어로 써보세요.",
+                    self.lines.len()
+                ))
+                .size(14)
+                .color(p.muted),
+            ]
+        } else {
+            column![
+                text("따라치기 완료").size(26).color(p.strong),
+                text(format!(
+                    "{:.0} WPM · 정확도 {:.0}%",
+                    self.wpm(),
+                    self.accuracy()
+                ))
+                .size(14)
+                .color(p.muted),
+            ]
+        }
         .spacing(4);
 
         let prompts = Column::with_children(self.lines.iter().enumerate().map(|(i, l)| {
@@ -1110,8 +1352,14 @@ impl Practice {
         }))
         .spacing(6);
 
+        let rewriting = self.draft.is_some();
         let editor = text_editor(&self.editor)
-            .placeholder("영어로 써보세요…")
+            .id(WRITE_ID)
+            .placeholder(if rewriting {
+                "교정문을 떠올리며 다시 써보세요…"
+            } else {
+                "영어로 써보세요…"
+            })
             .on_action(Msg::Edit)
             .font(en)
             .size(16)
@@ -1133,14 +1381,32 @@ impl Practice {
             });
 
         let can = idle && !self.editor.text().trim().is_empty();
-        let mut actions = row![
-            button(text("첨삭 받기"))
-                .style(primary(p))
-                .on_press_maybe(can.then_some(Msg::AskReview))
-                .padding([10, 24])
-        ]
-        .spacing(8)
-        .align_y(Center);
+        let mut actions = row![].spacing(8).align_y(Center);
+        match (&self.review, rewriting) {
+            // 첨삭 전: 처음 쓰기든 다시 쓰기든 첨삭 받기
+            (None, _) => {
+                actions = actions.push(
+                    button(text(if rewriting {
+                        "다시 첨삭 받기"
+                    } else {
+                        "첨삭 받기"
+                    }))
+                    .style(primary(p))
+                    .on_press_maybe(can.then_some(Msg::AskReview))
+                    .padding([10, 24]),
+                )
+            }
+            // 처음 쓴 글의 첨삭을 받았으면: 가리고 다시 쓰기
+            (Some(_), false) => {
+                actions = actions.push(
+                    button(text("교정문 가리고 다시 쓰기"))
+                        .style(primary(p))
+                        .on_press_maybe(idle.then_some(Msg::StartRewrite))
+                        .padding([10, 24]),
+                )
+            }
+            (Some(_), true) => {}
+        }
         if let Some((v, i)) = self.video()
             && i + 1 < v.chunks.len()
         {
@@ -1158,60 +1424,142 @@ impl Practice {
                 .padding([10, 16]),
         );
 
-        let mut page = column![
-            summary,
-            section(
-                p,
+        let (title, desc) = if rewriting {
+            (
+                "다시 써보세요",
+                "교정문은 가려 두었습니다. 고친 곳을 떠올리며 한국어만 보고 다시 써보세요.",
+            )
+        } else if reviewing {
+            (
+                "기억나는 대로 써보세요",
+                "원문과 똑같지 않아도 됩니다. 첨삭에서 고칠 곳이 나온 문장은 곧 다시 나옵니다.",
+            )
+        } else {
+            (
                 "이제 직접 써보세요",
                 "한국어를 보고 방금 친 영어를 떠올려 써보세요. 똑같지 않아도 됩니다. (건너뛰어도 됩니다)",
-                column![prompts, editor, actions].spacing(16),
-            ),
-        ]
-        .spacing(40);
+            )
+        };
+        // 첨삭이 오면 결과를 맨 위에(Reviewed 가 스크롤도 맨 위로 올린다), 쓰는 칸은 그 아래
+        let mut page = column![summary].spacing(40);
 
-        if let Some(r) = &self.review {
-            let label = |t| text(t).size(12).color(p.muted);
-            let fixes = Column::with_children(r.errors.iter().map(|f| {
-                column![
-                    rich_text![
-                        span::<(), Font>(&f.original)
-                            .font(en)
-                            .color(p.bad)
-                            .strikethrough(true),
-                        span("  →  ").color(p.muted),
-                        span(&f.fix).font(en).color(p.ok),
-                    ],
-                    text(&f.why_ko).font(ko).size(13).color(p.muted),
-                ]
-                .spacing(2)
-                .into()
-            }))
-            .spacing(12);
-            let model = Column::with_children(self.lines.iter().map(|l| {
-                text(format!("{}{}", l.who(), l.en))
-                    .font(en)
-                    .size(14)
-                    .color(p.fg)
-                    .into()
-            }))
-            .spacing(4);
+        // 다시 쓴 글의 첨삭까지 받았으면 처음 글과 나란히 비교
+        if let (Some((first, first_r)), Some(r)) = (&self.draft, &self.review) {
+            let count = |r: &Review| r.errors.iter().filter(|f| f.kind != Kind::Missing).count();
+            let label = |t: String| text(t).size(12).color(p.muted);
             page = page.push(card(
                 p,
                 column![
-                    label("교정문"),
-                    text(&r.corrected).font(en).color(p.strong),
-                    label("고친 곳"),
-                    fixes,
-                    label("총평"),
-                    text(&r.feedback_ko).font(ko).color(p.fg),
-                    label("모범 답안 (원문)"),
-                    model,
+                    text(format!("고칠 곳 {}개 → {}개", count(first_r), count(r)))
+                        .size(18)
+                        .color(p.strong),
+                    label("처음 쓴 글".into()),
+                    text(first).font(en).color(p.fg),
+                    label("다시 쓴 글".into()),
+                    text(self.editor.text()).font(en).color(p.fg),
+                    label("교정문 (처음 쓴 글)".into()),
+                    text(&first_r.corrected).font(en).color(p.strong),
                 ]
-                .spacing(12),
+                .spacing(10),
             ));
         }
+        if let Some(r) = &self.review {
+            page = page.push(self.review_card(p, r));
+        }
+        page = page.push(section(
+            p,
+            title,
+            desc,
+            column![prompts, editor, actions].spacing(16),
+        ));
         page.into()
     }
+
+    /// 첨삭 카드. 고친 곳은 이번에 집중할 유형을 먼저, 나머지는 흐리게.
+    fn review_card<'a>(&'a self, p: Palette, r: &'a Review) -> Element<'a, Msg> {
+        let (en, ko) = (self.en_font(), self.ko_font());
+        let label = |t: String| text(t).size(12).color(p.muted);
+        let focus = focus_kinds(r, &self.stats.error_kinds);
+        let fix_view = |f: &'a claude::Fix, strong: bool| -> Element<'a, Msg> {
+            let dim = |c: Color| if strong { c } else { Color { a: 0.6, ..c } };
+            column![
+                rich_text![
+                    span::<(), Font>(format!("{}  ", f.kind.label()))
+                        .font(ko)
+                        .size(12)
+                        .color(p.muted),
+                    span(&f.original)
+                        .font(en)
+                        .color(dim(p.bad))
+                        .strikethrough(true),
+                    span("  →  ").color(p.muted),
+                    span(&f.fix).font(en).color(dim(p.ok)),
+                ],
+                text(&f.why_ko).font(ko).size(13).color(p.muted),
+            ]
+            .spacing(2)
+            .into()
+        };
+        let (main, rest): (Vec<_>, Vec<_>) = r.errors.iter().partition(|f| focus.contains(&f.kind));
+        let mut col = column![
+            label("교정문".into()),
+            text(&r.corrected).font(en).color(p.strong)
+        ]
+        .spacing(12);
+        if !focus.is_empty() {
+            let names: Vec<_> = focus.iter().map(|k| k.label()).collect();
+            col = col
+                .push(label(format!("이번에 집중할 것 — {}", names.join(" · "))))
+                .push(
+                    Column::with_children(main.into_iter().map(|f| fix_view(f, true))).spacing(12),
+                );
+        }
+        if !rest.is_empty() {
+            col = col
+                .push(label(if focus.is_empty() {
+                    "고친 곳".into()
+                } else {
+                    "그 밖에 고친 곳".into()
+                }))
+                .push(
+                    Column::with_children(rest.into_iter().map(|f| fix_view(f, false))).spacing(12),
+                );
+        }
+        let model = Column::with_children(self.lines.iter().map(|l| {
+            text(format!("{}{}", l.who(), l.en))
+                .font(en)
+                .size(14)
+                .color(p.fg)
+                .into()
+        }))
+        .spacing(4);
+        col = col
+            .push(label("총평".into()))
+            .push(text(&r.feedback_ko).font(ko).color(p.fg))
+            .push(label("모범 답안 (원문)".into()))
+            .push(model);
+        card(p, col)
+    }
+}
+
+/// 이번 첨삭에서 집중할 오류 유형 (최대 2개): 이번에 많이 나온 순, 같으면 누적이 많은 순.
+/// 빠뜨림·구두점·기타는 문법 습관이 아니라서 빼고, 2번 이상 나온 유형만 본다.
+// ponytail: 하나뿐인 실수까지 다 강조하면 집중이 안 된다. 1번짜리도 보고 싶으면 n >= 2 조건을 뺀다.
+fn focus_kinds(r: &Review, history: &HashMap<String, u32>) -> Vec<Kind> {
+    let mut n: HashMap<Kind, usize> = HashMap::new();
+    for f in &r.errors {
+        if !matches!(f.kind, Kind::Missing | Kind::Punctuation | Kind::Other) {
+            *n.entry(f.kind).or_default() += 1;
+        }
+    }
+    let past = |k: &Kind| history.get(k.key()).copied().unwrap_or(0);
+    let mut v: Vec<_> = n.into_iter().filter(|&(_, c)| c >= 2).collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(past(&b.0).cmp(&past(&a.0))));
+    v.into_iter().take(2).map(|(k, _)| k).collect()
+}
+
+fn to_top() -> Task<Msg> {
+    operation::snap_to(SCROLL_ID, operation::RelativeOffset::START)
 }
 
 /// 이어할 세트: 다 끝났으면 처음부터.
@@ -1340,15 +1688,17 @@ fn section<'a>(
     column![head, content.into()].spacing(14).into()
 }
 
+/// 보관함 한 줄. 삭제는 두 번 눌러야 한다(영상은 자막을 다시 받아야 해서 되돌리기 어렵다).
 fn library_row(
     p: Palette,
     title: String,
     meta: String,
     open: &str,
     on_open: Option<Msg>,
-    on_delete: Msg,
+    confirming: bool,
+    del: Del,
 ) -> Element<'_, Msg> {
-    row![
+    let r = row![
         column![
             text(title).size(15).color(p.strong),
             text(meta).size(12).color(p.muted)
@@ -1359,15 +1709,36 @@ fn library_row(
             .style(pill(p, false))
             .on_press_maybe(on_open)
             .padding([5, 14]),
-        button(text("삭제").size(12).color(p.muted))
-            .style(quiet(p))
-            .on_press(on_delete)
-            .padding([5, 8]),
     ]
     .spacing(6)
     .align_y(Center)
-    .padding([8, 0])
-    .into()
+    .padding([8, 0]);
+    let r = if confirming {
+        let delete = match del {
+            Del::Video(id) => Msg::DeleteVideo(id),
+            Del::Lesson(i) => Msg::DeleteLesson(i),
+        };
+        r.push(
+            button(text("정말 삭제").size(12).color(p.bad))
+                .style(quiet(p))
+                .on_press(delete)
+                .padding([5, 8]),
+        )
+        .push(
+            button(text("취소").size(12).color(p.muted))
+                .style(quiet(p))
+                .on_press(Msg::CancelDelete)
+                .padding([5, 8]),
+        )
+    } else {
+        r.push(
+            button(text("삭제").size(12).color(p.muted))
+                .style(quiet(p))
+                .on_press(Msg::AskDelete(del))
+                .padding([5, 8]),
+        )
+    };
+    r.into()
 }
 
 fn toggle(p: Palette, label: &str, on: bool, msg: Msg) -> Element<'_, Msg> {
@@ -1426,4 +1797,102 @@ fn hidden_practice_neither_plays_video_nor_steals_focus() {
         "숨은 채로 플레이어 서버를 띄우거나 브라우저를 열면 안 된다"
     );
     // 보이게 되는 쪽(resume)은 실제로 서버를 띄우고 브라우저를 열기 때문에 단위 테스트하지 않는다(수동 점검)
+}
+
+#[test]
+fn focus_picks_repeated_kinds_and_breaks_ties_by_history() {
+    let fix = |kind| claude::Fix {
+        original: "x".into(),
+        fix: "y".into(),
+        why_ko: String::new(),
+        kind,
+        line: 1,
+    };
+    let r = Review {
+        corrected: String::new(),
+        feedback_ko: String::new(),
+        errors: vec![
+            fix(Kind::Tense),
+            fix(Kind::Tense),
+            fix(Kind::Article),
+            fix(Kind::Article),
+            fix(Kind::Preposition),
+            fix(Kind::Preposition),
+            fix(Kind::Spelling),
+            fix(Kind::Missing),
+            fix(Kind::Missing),
+        ],
+    };
+    let history = HashMap::from([("preposition".to_string(), 9), ("article".to_string(), 1)]);
+    // 셋 다 2번 → 누적 많은 전치사가 먼저, 한 번뿐인 철자·빠뜨림은 제외
+    assert_eq!(
+        focus_kinds(&r, &history),
+        vec![Kind::Preposition, Kind::Article]
+    );
+}
+
+#[test]
+fn rewrite_keeps_first_draft_and_counts_errors_once() {
+    let mut p = Practice::new();
+    p.reset(vec![Line {
+        speaker: String::new(),
+        en: "I went home.".into(),
+        ko: "나는 집에 갔다.".into(),
+        start: 0.0,
+        end: 0.0,
+    }]);
+    p.screen = Screen::Writing;
+    let review = || Review {
+        corrected: "I went home.".into(),
+        feedback_ko: String::new(),
+        errors: vec![claude::Fix {
+            original: "go".into(),
+            fix: "went".into(),
+            why_ko: String::new(),
+            kind: Kind::Tense,
+            line: 1,
+        }],
+    };
+    let before = p.stats.error_kinds.get("tense").copied().unwrap_or(0);
+    let _ = p.update(Msg::Reviewed(Ok(review())));
+    let _ = p.update(Msg::StartRewrite);
+    assert!(p.review.is_none() && p.draft.is_some(), "교정문은 가린다");
+    let _ = p.update(Msg::Reviewed(Ok(review())));
+    assert_eq!(
+        p.stats.error_kinds["tense"],
+        before + 1,
+        "다시 쓴 글은 세지 않는다"
+    );
+}
+
+#[test]
+fn escape_closes_topmost_first_and_delete_needs_confirm() {
+    let mut p = Practice::new();
+    p.screen = Screen::Typing;
+    p.lines = vec![Line {
+        speaker: String::new(),
+        en: "Hi.".into(),
+        ko: "안녕.".into(),
+        start: 0.0,
+        end: 0.0,
+    }];
+    p.show_settings = true;
+    p.error = Some("x".into());
+    let _ = p.update(Msg::Escape);
+    assert!(p.error.is_none() && p.show_settings && p.screen == Screen::Typing);
+    let _ = p.update(Msg::Escape);
+    assert!(!p.show_settings && p.screen == Screen::Typing);
+    let _ = p.update(Msg::Escape);
+    assert!(p.screen == Screen::Setup);
+
+    // 삭제: 한 번 누르면 묻기만 하고, 취소하면 그대로
+    p.library.lessons.push(Lesson {
+        title: "t".into(),
+        lines: vec![],
+    });
+    let n = p.library.lessons.len();
+    let _ = p.update(Msg::AskDelete(Del::Lesson(n - 1)));
+    assert_eq!(p.library.lessons.len(), n);
+    let _ = p.update(Msg::CancelDelete);
+    assert!(p.confirm_delete.is_none() && p.library.lessons.len() == n);
 }

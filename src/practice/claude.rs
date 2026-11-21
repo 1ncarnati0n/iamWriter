@@ -112,6 +112,82 @@ pub struct Fix {
     pub original: String,
     pub fix: String,
     pub why_ko: String,
+    #[serde(default)]
+    pub kind: Kind,
+    /// 몇 번째 한국어 줄의 실수인지(1부터). 모르면 0.
+    #[serde(default)]
+    pub line: usize,
+}
+
+/// 첨삭 오류 유형. 스키마의 enum 과 같은 이름(snake_case). 모르는 값은 Other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    Article,
+    Tense,
+    Preposition,
+    Agreement,
+    WordChoice,
+    WordOrder,
+    Spelling,
+    Punctuation,
+    Missing,
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+impl Kind {
+    pub const ALL: [Kind; 10] = [
+        Kind::Article,
+        Kind::Tense,
+        Kind::Preposition,
+        Kind::Agreement,
+        Kind::WordChoice,
+        Kind::WordOrder,
+        Kind::Spelling,
+        Kind::Punctuation,
+        Kind::Missing,
+        Kind::Other,
+    ];
+
+    /// 스키마·저장 파일에 쓰는 이름
+    pub fn key(self) -> &'static str {
+        match self {
+            Kind::Article => "article",
+            Kind::Tense => "tense",
+            Kind::Preposition => "preposition",
+            Kind::Agreement => "agreement",
+            Kind::WordChoice => "word_choice",
+            Kind::WordOrder => "word_order",
+            Kind::Spelling => "spelling",
+            Kind::Punctuation => "punctuation",
+            Kind::Missing => "missing",
+            Kind::Other => "other",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Article => "관사",
+            Kind::Tense => "시제",
+            Kind::Preposition => "전치사",
+            Kind::Agreement => "수 일치",
+            Kind::WordChoice => "어휘",
+            Kind::WordOrder => "어순",
+            Kind::Spelling => "철자",
+            Kind::Punctuation => "구두점",
+            Kind::Missing => "빠뜨림",
+            Kind::Other => "기타",
+        }
+    }
+
+    pub fn from_key(k: &str) -> Kind {
+        Kind::ALL
+            .into_iter()
+            .find(|x| x.key() == k)
+            .unwrap_or_default()
+    }
 }
 
 pub fn generate_lines(
@@ -181,15 +257,25 @@ pub fn review_writing(engine: Engine, lines: &[Line], written: &str) -> Result<R
         .iter()
         .map(|l| format!("{}{}", l.who(), l.en))
         .collect();
+    // 줄 번호를 붙여 보내야 오류마다 몇 번째 줄인지 받을 수 있다(복습 일정에 쓴다)
+    let numbered = |v: Vec<String>| {
+        v.iter()
+            .enumerate()
+            .map(|(i, s)| format!("{}. {s}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let prompt = format!(
         "A Korean learner translated these Korean lines into English.\n\n\
          Korean:\n{}\n\nReference English:\n{}\n\nLearner's English:\n{}\n\n\
          Review the learner's English. Do not require it to match the reference; accept any natural, correct English. The learner may omit speaker names; that is fine.\n\
          - `corrected`: the learner's text with minimal fixes so it is correct and natural.\n\
          - `errors`: each mistake as original fragment, fixed fragment, and a short explanation in Korean.\n\
-         - `feedback_ko`: 2-3 encouraging sentences in Korean: what they did well and the one thing to focus on next.",
-        ko.join("\n"),
-        model.join("\n"),
+           `kind` is the error type. `line` is the number of the Korean line the mistake belongs to.\n\
+           If a Korean line was not translated at all, add one error for it with an empty `original`, the reference sentence as `fix`, and kind `missing`.\n\
+         - `feedback_ko`: 2-3 encouraging sentences in Korean: what they did well and the one error type to focus on next.",
+        numbered(ko),
+        numbered(model),
         written
     );
     let schema = json!({
@@ -202,9 +288,11 @@ pub fn review_writing(engine: Engine, lines: &[Line], written: &str) -> Result<R
                 "properties": {
                     "original": {"type": "string"},
                     "fix": {"type": "string"},
-                    "why_ko": {"type": "string"}
+                    "why_ko": {"type": "string"},
+                    "kind": {"type": "string", "enum": Kind::ALL.map(Kind::key)},
+                    "line": {"type": "integer"}
                 },
-                "required": ["original", "fix", "why_ko"],
+                "required": ["original", "fix", "why_ko", "kind", "line"],
                 "additionalProperties": false
             }}
         },
@@ -340,6 +428,37 @@ mod tests {
     }
 
     // 실제 CLI를 부른다(사용량 소모). `cargo test -- --ignored` 로만 실행.
+    #[test]
+    fn unknown_or_missing_kind_does_not_break_review() {
+        let f: super::Fix = serde_json::from_value(serde_json::json!(
+            {"original": "a", "fix": "b", "why_ko": "c", "kind": "idiom"}
+        ))
+        .unwrap();
+        assert_eq!((f.kind, f.line), (super::Kind::Other, 0));
+        assert_eq!(super::Kind::from_key("tense"), super::Kind::Tense);
+        assert_eq!(super::Kind::from_key("??"), super::Kind::Other);
+    }
+
+    #[test]
+    #[ignore]
+    fn live_review() {
+        let line = |en: &str, ko: &str| super::Line {
+            speaker: String::new(),
+            en: en.into(),
+            ko: ko.into(),
+            start: 0.0,
+            end: 0.0,
+        };
+        let lines = [
+            line("I went to the park yesterday.", "나는 어제 공원에 갔다."),
+            line("It was very sunny.", "날씨가 아주 화창했다."),
+        ];
+        // 2번 줄은 안 썼다 → missing 으로 보고돼야 한다
+        let r = super::review_writing(Engine::Claude, &lines, "I go to park yesterday.").unwrap();
+        assert!(r.errors.iter().any(|f| f.line == 1), "{r:?}");
+        assert!(r.errors.iter().any(|f| f.line == 2), "{r:?}");
+    }
+
     #[test]
     #[ignore]
     fn live_generate_codex() {

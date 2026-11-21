@@ -47,22 +47,23 @@ fn load_first<T: Default + DeserializeOwned>(paths: &[PathBuf]) -> T {
         .unwrap_or_default()
 }
 
-fn save<T: Serialize>((name, _): (&str, &str), value: &T) {
-    write_json(&dir().join(name), value)
+fn save<T: Serialize>((name, _): (&str, &str), value: &T) -> Result<(), String> {
+    write_json(&dir().join(name), value).map_err(|e| format!("{name} 저장 실패: {e}"))
 }
 
 /// 임시 파일에 쓴 뒤 rename — 쓰다가 앱이 꺼져도 기존 파일이 깨지지 않는다.
-fn write_json<T: Serialize>(path: &Path, value: &T) {
-    let Ok(s) = serde_json::to_string(value) else {
-        return;
-    };
+/// 실패하면 이유를 돌려준다(디스크 가득 참, 권한 등). 부르는 쪽이 화면에 알린다.
+fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let s = serde_json::to_string(value).map_err(|e| e.to_string())?;
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, s).is_ok() {
-        let _ = std::fs::rename(tmp, path);
-    }
+    std::fs::write(&tmp, s).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -93,7 +94,7 @@ impl Stats {
     pub fn load() -> Self {
         load(STATS)
     }
-    pub fn save(&self) {
+    pub fn save(&self) -> Result<(), String> {
         save(STATS, self)
     }
     /// 지금 고른 엔진과 모델
@@ -170,7 +171,7 @@ impl Library {
     pub fn load() -> Self {
         load(LIBRARY)
     }
-    pub fn save(&self) {
+    pub fn save(&self) -> Result<(), String> {
         save(LIBRARY, self)
     }
     pub fn video(&self, id: &str) -> Option<&Video> {
@@ -315,7 +316,7 @@ mod tests {
         );
         // 저장은 새 위치에만 (폴더가 없어도 만든다)
         s.lines_typed = 70;
-        write_json(&new, &s);
+        write_json(&new, &s).unwrap();
         let s: Stats = load_first(&[new.clone(), old.clone()]);
         assert_eq!(s.lines_typed, 70);
         assert_eq!(std::fs::read(&old).unwrap(), before, "옛 파일은 그대로");
@@ -323,5 +324,12 @@ mod tests {
         std::fs::write(&new, "{").unwrap();
         assert_eq!(load_first::<Stats>(&[new, old]).lines_typed, 69);
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn failed_save_reports_why() {
+        // 파일 밑에 폴더를 만들 수 없다 → 조용히 넘어가지 않고 이유를 돌려준다
+        let e = write_json(Path::new("/dev/null/iamwriter/x.json"), &Stats::default());
+        assert!(e.is_err(), "{e:?}");
     }
 }

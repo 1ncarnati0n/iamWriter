@@ -233,8 +233,10 @@ pub(crate) struct Practice {
     slow: bool,
     /// 자막과 함께 보고 있는 영상 ID
     watching: Option<String>,
-    /// 보기용 자막을 뒤에서 한 세트씩 번역하는 중 (busy 와 달리 다른 버튼을 막지 않는다)
-    converting: bool,
+    /// 보기용 자막을 뒤에서 번역 중인 세트 (영상 ID, 세트 번호). busy 와 달리 다른 버튼을 막지 않는다
+    converting: Option<(String, usize)>,
+    /// 따라치기로 열려고 번역을 기다리는 세트. 뒤에서 이미 번역 중이면 그 결과를 받아 연다(두 번 부르지 않게)
+    opening: Option<(String, usize)>,
     /// 숨어 있을 때 보기가 정해졌으면, 보일 때 플레이어를 연다(resume)
     watch_pending: bool,
     /// 설치된 추천 글꼴 (영문, 한글)
@@ -366,10 +368,25 @@ impl Practice {
             player: None,
             slow: false,
             watching: None,
-            converting: false,
+            converting: None,
+            opening: None,
             watch_pending: false,
             fonts: (font_groups(EN_FONTS), font_groups(KO_FONTS)),
             visible: false, // 앱은 집중 글쓰기 모드로 시작한다
+        }
+    }
+
+    /// 기록·설정 저장. 실패하면 상태줄 오류로 알린다(조용히 잃지 않게).
+    fn save_stats(&mut self) {
+        if let Err(e) = self.stats.save() {
+            self.error = Some(e);
+        }
+    }
+
+    /// 보관함 저장. 실패하면 상태줄 오류로 알린다.
+    fn save_library(&mut self) {
+        if let Err(e) = self.library.save() {
+            self.error = Some(e);
         }
     }
 
@@ -435,7 +452,7 @@ impl Practice {
                                 lines: lines.clone(),
                             },
                         );
-                        self.library.save();
+                        self.save_library();
                         self.cur_video = None;
                         return self.begin(lines);
                     }
@@ -471,7 +488,7 @@ impl Practice {
             }
             Msg::Engine(e) => {
                 self.stats.engine = e;
-                self.stats.save();
+                self.save_stats();
                 self.checked = None;
                 return self.load_models();
             }
@@ -482,7 +499,7 @@ impl Practice {
             Msg::ModelsLoaded(r) => self.models = Some(r),
             Msg::Model(m) => {
                 self.stats.models.insert(self.stats.engine, m);
-                self.stats.save();
+                self.save_stats();
                 self.checked = None;
             }
             Msg::ApiKey(k) => self.api_key = k,
@@ -513,11 +530,11 @@ impl Practice {
             }
             Msg::EnFont(f) => {
                 self.stats.en_font = Some(f.into());
-                self.stats.save();
+                self.save_stats();
             }
             Msg::KoFont(f) => {
                 self.stats.ko_font = Some(f.into());
-                self.stats.save();
+                self.save_stats();
             }
             Msg::Edit(a) => self.editor.perform(a),
             Msg::AskReview => {
@@ -602,7 +619,7 @@ impl Practice {
                             progress: 0,
                         },
                     );
-                    self.library.save();
+                    self.save_library();
                     self.yt_url.clear();
                     self.busy = None;
                     return self.update(Msg::Watch(t.id));
@@ -626,22 +643,42 @@ impl Practice {
                 return self.start_watch();
             }
             Msg::WatchSet(id, i, res) => {
-                self.converting = false;
+                self.converting = None;
+                let job = (id.clone(), i);
+                let waiting = self.opening.as_ref() == Some(&job);
+                if waiting {
+                    self.opening = None;
+                    self.busy = None;
+                }
                 match res {
                     Ok(lines) => {
                         if let Some(set) =
                             self.library.video_mut(&id).and_then(|v| v.sets.get_mut(i))
                         {
-                            *set = Some(lines);
+                            *set = Some(lines.clone());
                         }
-                        self.library.save();
+                        self.save_library();
                         if self.watching.as_ref() == Some(&id) {
                             self.push_subs();
+                        }
+                        // 따라치기가 이 세트를 기다리고 있었으면 바로 연다
+                        let open = if waiting {
+                            self.cur_video = Some(job);
+                            self.begin(lines)
+                        } else {
+                            Task::none()
+                        };
+                        // 지금 보는 영상(번역하던 영상과 달라도)의 다음 세트로
+                        return Task::batch([open, self.convert_next()]);
+                    }
+                    Err(e) => {
+                        self.error = Some(e);
+                        // 보던 영상의 번역이 실패하면 멈춘다(같은 실패를 되풀이하지 않게. 다시 보기로 이어서).
+                        // 다른 영상으로 바꾼 뒤에 옛 영상이 실패한 거면 지금 영상은 시작한다
+                        if self.watching.as_ref() != Some(&id) {
                             return self.convert_next();
                         }
                     }
-                    // 실패하면 멈춘다(영어 자막은 그대로 보인다). 다시 보기를 누르면 이어서 번역
-                    Err(e) => self.error = Some(e),
                 }
             }
             Msg::StopWatch => self.watching = None,
@@ -660,6 +697,12 @@ impl Practice {
                 };
                 self.busy = Some(self.working("자막을 문장으로 정리하는 중"));
                 self.error = None;
+                let job = (id.clone(), i);
+                self.opening = Some(job.clone());
+                // 보기용으로 이미 번역 중인 세트면 그 결과(WatchSet)를 기다린다
+                if self.converting.as_ref() == Some(&job) {
+                    return Task::none();
+                }
                 let ai = self.stats.ai();
                 return Task::perform(
                     off_thread(move || {
@@ -673,6 +716,7 @@ impl Practice {
             }
             Msg::SetReady(id, i, res) => {
                 self.busy = None;
+                self.opening = None;
                 match res {
                     Ok(lines) => {
                         if let Some(set) =
@@ -680,7 +724,10 @@ impl Practice {
                         {
                             *set = Some(lines.clone());
                         }
-                        self.library.save();
+                        self.save_library();
+                        if self.watching.as_ref() == Some(&id) {
+                            self.push_subs();
+                        }
                         self.cur_video = Some((id, i));
                         return self.begin(lines);
                     }
@@ -715,13 +762,13 @@ impl Practice {
                 self.confirm_delete = None;
                 if i < self.library.lessons.len() {
                     self.library.lessons.remove(i);
-                    self.library.save();
+                    self.save_library();
                 }
             }
             Msg::DeleteVideo(id) => {
                 self.confirm_delete = None;
                 self.library.videos.retain(|v| v.id != id);
-                self.library.save();
+                self.save_library();
             }
             Msg::Replay => {
                 self.play_current();
@@ -744,7 +791,7 @@ impl Practice {
             }
             Msg::Cookies(on) => {
                 self.stats.no_yt_cookies = !on;
-                self.stats.save();
+                self.save_stats();
             }
             Msg::Drag => return window::oldest().and_then(window::drag),
             Msg::Maximize => return window::oldest().and_then(window::toggle_maximize),
@@ -817,7 +864,7 @@ impl Practice {
                     .or_default() += 1;
             }
         }
-        self.stats.save();
+        self.save_stats();
         if self.review_cards.is_empty() {
             return;
         }
@@ -831,7 +878,7 @@ impl Practice {
         for (i, &card) in self.review_cards.iter().enumerate() {
             self.library.grade(card, !failed(i + 1), t);
         }
-        self.library.save();
+        self.save_library();
     }
 
     /// 보일 때만: 따라치기 화면이면 현재 문장을 재생하고 입력칸에 포커스.
@@ -907,17 +954,23 @@ impl Practice {
 
     /// 번역 안 된 첫 세트를 뒤에서 번역(한 번에 하나). 다 됐으면 아무것도 안 한다.
     fn convert_next(&mut self) -> Task<Msg> {
-        if self.converting {
+        if self.converting.is_some() {
             return Task::none();
         }
         let Some(v) = self.watching.as_ref().and_then(|id| self.library.video(id)) else {
             return Task::none();
         };
-        let Some(i) = v.sets.iter().position(Option::is_none) else {
+        // 따라치기가 따로 번역 중인 세트는 건너뛴다
+        let opening = |i: usize| {
+            self.opening
+                .as_ref()
+                .is_some_and(|(oid, oi)| *oid == v.id && *oi == i)
+        };
+        let Some(i) = (0..v.sets.len()).find(|&i| v.sets[i].is_none() && !opening(i)) else {
             return Task::none();
         };
         let (id, chunk, ai) = (v.id.clone(), v.chunks[i].clone(), self.stats.ai());
-        self.converting = true;
+        self.converting = Some((id.clone(), i));
         Task::perform(
             off_thread(move || {
                 claude::lines_from_transcript(&ai, &chunk.text()).map(|mut lines| {
@@ -948,15 +1001,14 @@ impl Practice {
             self.stats.best_wpm = self.stats.best_wpm.max(self.wpm());
             self.screen = Screen::Writing;
             self.library.add_to_deck(&self.lines, today());
-            self.library.save();
             if let Some((id, i)) = &self.cur_video
                 && let Some(v) = self.library.video_mut(id)
             {
                 v.progress = v.progress.max(i + 1);
-                self.library.save();
             }
+            self.save_library();
         }
-        self.stats.save();
+        self.save_stats();
     }
 
     fn wpm(&self) -> f64 {
@@ -1235,7 +1287,7 @@ impl Practice {
             let done = v.sets.iter().filter(|s| s.is_some()).count();
             let status = if done == v.sets.len() {
                 "자막 번역 완료".to_string()
-            } else if self.converting {
+            } else if self.converting.is_some() {
                 format!("한국어 자막 번역 중 · {done}/{} 세트", v.sets.len())
             } else {
                 format!(
@@ -2613,4 +2665,65 @@ fn watching_shows_raw_english_until_translated_and_waits_while_hidden() {
     assert!(p.player.is_none() && p.watch_pending && p.watching.is_some());
     let _ = p.update(Msg::StopWatch);
     assert!(p.watching.is_none());
+}
+
+#[test]
+fn background_translation_follows_the_watched_video_and_is_never_doubled() {
+    let vid = |id: &str, n: usize| Video {
+        id: id.into(),
+        title: id.into(),
+        chunks: vec![
+            youtube::Chunk {
+                words: vec![(0.0, "hi".into())],
+                end: 1.0
+            };
+            n
+        ],
+        sets: vec![None; n],
+        progress: 0,
+    };
+    let (a, b) = ("AAAAAAAAAAA".to_string(), "BBBBBBBBBBB".to_string());
+    let line = || Line {
+        speaker: String::new(),
+        en: "Hi.".into(),
+        ko: "안녕.".into(),
+        start: 0.0,
+        end: 1.0,
+    };
+
+    // A 번역 중에 B 로 바꿈 → A 가 끝나면 B 를 이어서 번역한다
+    let mut p = Practice::new();
+    p.library.videos = vec![vid(&a, 1), vid(&b, 1)];
+    p.converting = Some((a.clone(), 0));
+    p.watching = Some(b.clone());
+    let _ = p.update(Msg::WatchSet(a.clone(), 0, Ok(vec![line()])));
+    assert_eq!(p.converting, Some((b.clone(), 0)), "B 번역이 시작돼야 한다");
+    // 옛 영상 번역이 실패해도 지금 영상은 시작
+    p.converting = Some((a.clone(), 0));
+    p.library.videos[0].sets[0] = None;
+    let _ = p.update(Msg::WatchSet(a.clone(), 0, Err("x".into())));
+    assert_eq!(p.converting, Some((b.clone(), 0)));
+
+    // 뒤에서 번역 중인 세트를 따라치기로 열면: 다시 부르지 않고 기다렸다가 그 결과로 연다
+    let mut p = Practice::new();
+    p.library.videos = vec![vid(&a, 2)];
+    p.watching = Some(a.clone());
+    p.converting = Some((a.clone(), 0));
+    let _ = p.update(Msg::OpenSet(a.clone(), 0));
+    assert!(p.busy.is_some() && p.opening == Some((a.clone(), 0)));
+    let _ = p.update(Msg::WatchSet(a.clone(), 0, Ok(vec![line()])));
+    assert!(p.screen == Screen::Typing && p.busy.is_none() && p.opening.is_none());
+    assert_eq!(
+        p.converting,
+        Some((a.clone(), 1)),
+        "보기 번역은 다음 세트로"
+    );
+
+    // 따라치기가 따로 번역 중인 세트는 뒤 번역이 건너뛴다
+    let mut p = Practice::new();
+    p.library.videos = vec![vid(&a, 2)];
+    p.watching = Some(a.clone());
+    p.opening = Some((a.clone(), 0));
+    let _ = p.convert_next();
+    assert_eq!(p.converting, Some((a, 1)));
 }

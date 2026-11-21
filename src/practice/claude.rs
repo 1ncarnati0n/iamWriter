@@ -433,8 +433,8 @@ impl Kind {
     }
 }
 
-/// AI 문장의 장르
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// AI 문장의 장르. 보관함 문장에도 저장한다(직접 쓰기 화면의 안내가 장르마다 다르다).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Genre {
     Chat,
     Story,

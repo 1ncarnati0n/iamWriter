@@ -109,9 +109,10 @@
       seg = null;
       rate = opt.slow ? 0.75 : 1;
       player.setPlaybackRate(rate);
-      if (c.id !== cur) { cur = c.id; player.loadVideoById({ videoId: c.id, startSeconds: 0 }); }
+      const from = cur === c.id ? null : savedPos(c.id);
+      if (c.id !== cur) { cur = c.id; player.loadVideoById({ videoId: c.id, startSeconds: from || 0 }); }
       else player.playVideo();
-      msg('영상 보기 — 문장을 누르면 그 자리로 갑니다');
+      msg(from ? '지난번 본 곳(' + fmt(from) + ')부터 이어서 봅니다' : '영상 보기 — 문장을 누르면 그 자리로 갑니다');
       return;
     }
     seg = { start: c.start, end: c.end };
@@ -187,6 +188,15 @@
     player.playVideo();
     show(i);
   }
+  // 이어 보기: 영상마다 본 위치를 브라우저에 저장. 거의 끝까지 봤으면 다음엔 처음부터
+  const posKey = (id) => 'iamwriter-pos-' + id;
+  const savedPos = (id) => Number(localStorage.getItem(posKey(id))) || 0;
+  setInterval(() => {
+    if (mode !== 'watch' || !cur || !player || !player.getCurrentTime) return;
+    const t = player.getCurrentTime(), d = player.getDuration();
+    if (t > 5 && d && t < d - 15) localStorage.setItem(posKey(cur), String(Math.floor(t)));
+    else if (d && t >= d - 15) localStorage.removeItem(posKey(cur));
+  }, 3000);
   // 문장마다 멈춤: 지금 문장 끝에서 한 번 멈춘다. pausedFor = 이미 멈춘 문장(다시 재생하면 그냥 넘어간다)
   let pausedFor = -1;
   function save() { localStorage.setItem('iamwriter-watch', JSON.stringify(opt)); }

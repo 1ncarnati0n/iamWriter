@@ -197,6 +197,8 @@ pub(crate) struct Practice {
     screen: Screen,
     /// 처음 화면에서 고른 기능
     section: Section,
+    /// 지금 문장이 보관함의 AI 문장이면 그 장르(직접 쓰기 안내가 달라진다). 유튜브 · 복습이면 None
+    lesson_genre: Option<Genre>,
     level: &'static str,
     genre: Genre,
     topic: String,
@@ -258,7 +260,8 @@ pub(crate) enum Msg {
     AskReview,
     Reviewed(Result<Review, String>),
     StartRewrite,
-    StartReview,
+    /// 복습 시작. true 면 미리 복습(기한 전 카드도, 가까운 순)
+    StartReview(bool),
     ToggleSettings,
     AskDelete(Del),
     CancelDelete,
@@ -337,6 +340,7 @@ impl Practice {
             library,
             screen: Screen::Setup,
             section,
+            lesson_genre: None,
             level: "A2",
             genre: Genre::Chat,
             topic: "ordering coffee".into(),
@@ -450,11 +454,14 @@ impl Practice {
                             Lesson {
                                 title,
                                 lines: lines.clone(),
+                                genre: Some(self.genre),
                             },
                         );
                         self.save_library();
                         self.cur_video = None;
-                        return self.begin(lines);
+                        let task = self.begin(lines);
+                        self.lesson_genre = Some(self.genre);
+                        return task;
                     }
                     Err(e) => self.error = Some(e),
                 }
@@ -568,8 +575,10 @@ impl Practice {
                     return self.show_writing();
                 }
             }
-            Msg::StartReview => {
-                let cards = self.library.due(today(), REVIEW_MAX);
+            Msg::StartReview(early) => {
+                // 미리 복습: 기한과 상관없이 가까운 순. 맞히면 오늘부터 다음 간격이 시작된다
+                let until = if early { u32::MAX } else { today() };
+                let cards = self.library.due(until, REVIEW_MAX);
                 if !cards.is_empty() {
                     let lines = cards
                         .iter()
@@ -736,16 +745,19 @@ impl Practice {
             }
             Msg::OpenLesson(i) => {
                 if let Some(l) = self.library.lessons.get(i) {
-                    let lines = l.lines.clone();
+                    let (lines, genre) = (l.lines.clone(), l.genre);
                     self.cur_video = None;
-                    return self.begin(lines);
+                    let task = self.begin(lines);
+                    self.lesson_genre = genre;
+                    return task;
                 }
             }
             Msg::WriteLesson(i) => {
                 if let Some(l) = self.library.lessons.get(i) {
-                    let lines = l.lines.clone();
+                    let (lines, genre) = (l.lines.clone(), l.genre);
                     self.cur_video = None;
                     self.reset(lines);
+                    self.lesson_genre = genre;
                     self.screen = Screen::Writing;
                     return self.show_writing();
                 }
@@ -850,6 +862,7 @@ impl Practice {
         self.review = None;
         self.draft = None;
         self.review_cards.clear();
+        self.lesson_genre = None;
         self.error = None;
     }
 
@@ -1233,7 +1246,7 @@ impl Practice {
                     .width(Fill),
                     button(text("복습 시작"))
                         .style(primary(p))
-                        .on_press_maybe(idle.then_some(Msg::StartReview))
+                        .on_press_maybe(idle.then_some(Msg::StartReview(false)))
                         .padding([10, 24]),
                 ]
                 .spacing(12)
@@ -1241,12 +1254,21 @@ impl Practice {
             )
         } else if deck > 0 {
             let next = self.library.deck.iter().map(|c| c.due).min().unwrap_or(t);
-            text(format!(
-                "오늘은 복습할 문장이 없습니다 · 카드 {deck}장 · 다음 복습은 {}일 뒤",
-                next.saturating_sub(t)
-            ))
-            .size(14)
-            .color(p.fg)
+            row![
+                text(format!(
+                    "오늘은 복습할 문장이 없습니다 · 카드 {deck}장 · 다음 복습은 {}일 뒤",
+                    next.saturating_sub(t)
+                ))
+                .size(14)
+                .color(p.fg)
+                .width(Fill),
+                button(text(format!("미리 복습 ({}문장)", deck.min(REVIEW_MAX))).size(13))
+                    .style(pill(p, false))
+                    .on_press_maybe(idle.then_some(Msg::StartReview(true)))
+                    .padding([6, 14]),
+            ]
+            .spacing(12)
+            .align_y(Center)
             .into()
         } else {
             text("아직 복습 카드가 없습니다. 유튜브나 AI 문장으로 따라치기를 끝까지 하면 그 문장들이 카드가 되고, 다음 날부터 여기에 나옵니다.")
@@ -1323,7 +1345,7 @@ impl Practice {
                     .spacing(8)
                     .align_y(Center)
                     .wrap(),
-                    text("플레이어: Space 재생/멈춤 · ←→ 문장 이동 · R 다시 듣기 · K 한국어 숨기기")
+                    text("플레이어: Space 재생/멈춤 · ←→ 문장 이동 · R 다시 듣기 · K 한국어 숨기기 · 다음에 열면 지난번 본 곳부터")
                         .size(12)
                         .color(p.muted),
                 ]
@@ -1996,12 +2018,15 @@ impl Practice {
         .spacing(6);
 
         let rewriting = self.draft.is_some();
+        let prompt = self.lesson_genre == Some(Genre::Prompt);
         let editor = text_editor(&self.editor)
             .id(WRITE_ID)
-            .placeholder(if rewriting {
-                "교정문을 떠올리며 다시 써보세요…"
-            } else {
-                "영어로 써보세요…"
+            .placeholder(match (rewriting, prompt) {
+                (true, _) => "교정문을 떠올리며 다시 써보세요…",
+                (false, true) => {
+                    "Claude Code에 보낼 프롬프트를 영어로 써보세요… (예: Please add a test for …)"
+                }
+                (false, false) => "영어로 써보세요…",
             })
             .on_action(Msg::Edit)
             .font(en)
@@ -2076,6 +2101,11 @@ impl Practice {
             (
                 "기억나는 대로 써보세요",
                 "원문과 똑같지 않아도 됩니다. 첨삭에서 고칠 곳이 나온 문장은 곧 다시 나옵니다.",
+            )
+        } else if prompt {
+            (
+                "이제 프롬프트를 직접 써보세요",
+                "한국어 뜻을 보고 Claude Code에 보낼 영어 프롬프트를 써보세요. 무엇을 · 어디서 · 어떻게 확인할지까지 적으면 좋습니다. 첨삭이 문법과 함께 지시가 명확한지도 봐 줍니다.",
             )
         } else {
             (
@@ -2588,6 +2618,7 @@ fn escape_closes_topmost_first_and_delete_needs_confirm() {
     p.library.lessons.push(Lesson {
         title: "t".into(),
         lines: vec![],
+        genre: None,
     });
     let n = p.library.lessons.len();
     let _ = p.update(Msg::AskDelete(Del::Lesson(n - 1)));
@@ -2610,11 +2641,17 @@ fn library_lesson_goes_straight_to_writing() {
                 start: 0.0,
                 end: 0.0,
             }],
+            genre: Some(Genre::Prompt),
         },
     );
     let _ = p.update(Msg::Section(Section::Write));
     let _ = p.update(Msg::WriteLesson(0));
     assert!(p.screen == Screen::Writing && p.review_cards.is_empty() && p.total_chars == 0);
+    assert_eq!(
+        p.lesson_genre,
+        Some(Genre::Prompt),
+        "프롬프트 안내를 보여 준다"
+    );
     let _ = p.update(Msg::Home);
     assert!(
         p.screen == Screen::Setup && p.section == Section::Write,
@@ -2726,4 +2763,25 @@ fn background_translation_follows_the_watched_video_and_is_never_doubled() {
     p.opening = Some((a.clone(), 0));
     let _ = p.convert_next();
     assert_eq!(p.converting, Some((a, 1)));
+}
+
+#[test]
+fn early_review_starts_before_the_due_date() {
+    let mut p = Practice::new();
+    let line = Line {
+        speaker: String::new(),
+        en: "Hi.".into(),
+        ko: "안녕.".into(),
+        start: 0.0,
+        end: 0.0,
+    };
+    p.library.deck.clear();
+    p.library.add_to_deck(&[line], today()); // 내일부터 복습
+    let _ = p.update(Msg::StartReview(false));
+    assert!(p.screen == Screen::Setup, "오늘은 복습할 게 없다");
+    let _ = p.update(Msg::StartReview(true));
+    assert!(
+        p.screen == Screen::Writing && p.review_cards == [0],
+        "미리 복습은 바로 시작"
+    );
 }

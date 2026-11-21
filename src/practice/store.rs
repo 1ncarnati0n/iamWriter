@@ -1,7 +1,7 @@
 // 영어 공부 모드의 저장소: 통계·연습 설정(practice.json), 보관함(practice-library.json)
 // 위치: ~/Library/Application Support/iamWriter/. 새 파일이 없을 때만 typingEng 의 옛 파일(~/.typing_eng*.json)을 읽는다.
 // 옛 파일은 읽기만 하고 고치거나 지우지 않는다(백업).
-use crate::practice::claude::{Ai, Engine, Line};
+use crate::practice::claude::{Ai, Engine, Genre, Line};
 use crate::practice::youtube::Chunk;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
@@ -108,6 +108,9 @@ impl Stats {
 pub struct Lesson {
     pub title: String,
     pub lines: Vec<Line>,
+    /// 만든 장르. 장르를 저장하기 전에 만든 문장은 None
+    #[serde(default)]
+    pub genre: Option<Genre>,
 }
 
 /// 유튜브 영상: 자막 세트 전체 + Claude로 변환을 마친 세트 + 진행 위치.

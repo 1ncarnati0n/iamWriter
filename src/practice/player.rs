@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const PAGE: &str = include_str!("player.html");
+/// 고정 포트. 브라우저 저장소(localStorage: 자막 토글 · 이어 보기 위치)는 주소(포트 포함)마다 따로라서,
+/// 포트가 매번 바뀌면 지난번 설정을 못 읽는다. 다른 프로그램이 쓰고 있으면 아무 포트나 쓴다(그때는 설정이 새로 시작).
+const PORT: u16 = 38917;
 
 #[derive(Default)]
 struct Cmd {
@@ -32,7 +35,8 @@ pub struct Player {
 
 impl Player {
     pub fn start() -> Result<Self, String> {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        let listener = TcpListener::bind(("127.0.0.1", PORT))
+            .or_else(|_| TcpListener::bind("127.0.0.1:0"))
             .map_err(|e| format!("플레이어 서버 시작 실패: {e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let cmd = Arc::new(Mutex::new(Cmd {

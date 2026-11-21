@@ -170,10 +170,18 @@
     const l = subs[i];
     $('now').children[0].textContent = l ? l.en : '';
     $('now').children[1].textContent = l ? (l.ko || '') : '';
-    if (rows[i]) { rows[i].classList.add('cur'); rows[i].scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+    if (rows[i]) {
+      rows[i].classList.add('cur');
+      // 사용자가 목록을 직접 움직이는 중이면 끌고 가지 않는다
+      if (Date.now() - userScrolled > 4000) rows[i].scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
   }
+  // 목록을 휠 · 터치로 움직인 시각. 4초 동안 자동 스크롤을 멈춘다
+  let userScrolled = 0;
+  ['wheel', 'touchmove'].forEach((e) => $('list').addEventListener(e, () => { userScrolled = Date.now(); }, { passive: true }));
   function jump(i) {
     if (!subs[i] || !player) return;
+    userScrolled = 0; // 문장을 고르면 다시 따라간다
     pausedFor = -1;
     player.seekTo(subs[i].start, true);
     player.playVideo();

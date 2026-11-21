@@ -668,9 +668,43 @@ fn call_api<T: DeserializeOwned>(model: &str, prompt: &str, schema: Value) -> Re
     api_result(&api_request(API_URL, &headers, Some(body.to_string()))?)
 }
 
+/// 다시 보내기 전 기다리는 시간(초). 이만큼 실패하면 오류를 보여 준다.
+const RETRY_WAIT: [u64; 2] = [2, 6];
+
+/// 잠깐 뒤 다시 보내면 될 수 있는 오류: 요청 한도 · 과부하 · 서버 오류. 키 · 요청 오류는 다시 보내도 같다.
+fn retryable(v: &Value) -> bool {
+    v["type"] == "error"
+        && matches!(
+            v["error"]["type"].as_str(),
+            Some("rate_limit_error" | "overloaded_error" | "api_error")
+        )
+}
+
 /// API 키로 Claude API 를 부르고 JSON 을 돌려준다. body 가 없으면 GET.
-/// 키는 curl 설정으로 표준 입력에 넘겨 명령 인수(ps 에 보임)에 남지 않게 한다.
+/// 요청 한도 · 과부하 · 서버 오류 · 연결 실패는 잠깐 기다렸다가 다시 보낸다(RETRY_WAIT).
 fn api_request(url: &str, headers: &[&str], body: Option<String>) -> Result<Value, String> {
+    let mut waits = RETRY_WAIT.iter();
+    loop {
+        let (v, again) = match api_request_once(url, headers, body.as_deref()) {
+            Ok(v) => {
+                let again = retryable(&v);
+                (Ok(v), again)
+            }
+            // curl 자체 실패(연결 끊김 등)도 다시
+            Err(e) => (Err(e), true),
+        };
+        match (again, waits.next()) {
+            (true, Some(&w)) => std::thread::sleep(std::time::Duration::from_secs(w)),
+            _ => {
+                let v = v?;
+                return api_error(&v).map_or(Ok(v), Err);
+            }
+        }
+    }
+}
+
+/// 한 번 부른다. 키는 curl 설정으로 표준 입력에 넘겨 명령 인수(ps 에 보임)에 남지 않게 한다.
+fn api_request_once(url: &str, headers: &[&str], body: Option<&str>) -> Result<Value, String> {
     let key = env_key().or_else(keychain_key).ok_or(
         "Claude API 키가 없습니다. 설정 → 영어 공부에서 키를 저장하거나 ANTHROPIC_API_KEY 를 설정하세요.",
     )?;
@@ -707,9 +741,8 @@ fn api_request(url: &str, headers: &[&str], body: Option<String>) -> Result<Valu
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    let v: Value = serde_json::from_slice(&out.stdout)
-        .map_err(|_| "Claude API 응답을 읽을 수 없습니다.".to_string())?;
-    api_error(&v).map_or(Ok(v), Err)
+    serde_json::from_slice(&out.stdout)
+        .map_err(|_| "Claude API 응답을 읽을 수 없습니다.".to_string())
 }
 
 /// 오류 응답이면 한국어 안내.
@@ -949,6 +982,23 @@ mod tests {
         assert_eq!((m[0].label.as_str(), m[0].effort), ("Opus 5.5", true));
         assert_eq!((m[1].id.as_str(), m[1].effort), ("claude-haiku-4-5", false));
         assert!(super::live_models(&serde_json::Value::Null).is_empty());
+    }
+
+    #[test]
+    fn only_temporary_api_errors_are_retried() {
+        use serde_json::json;
+        let err = |t: &str| json!({"type": "error", "error": {"type": t, "message": "m"}});
+        for t in ["rate_limit_error", "overloaded_error", "api_error"] {
+            assert!(super::retryable(&err(t)), "{t}");
+        }
+        for t in [
+            "authentication_error",
+            "invalid_request_error",
+            "not_found_error",
+        ] {
+            assert!(!super::retryable(&err(t)), "{t}");
+        }
+        assert!(!super::retryable(&json!({"type": "message"})));
     }
 
     #[test]

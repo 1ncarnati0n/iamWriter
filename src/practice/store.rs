@@ -1,7 +1,7 @@
 // 영어 공부 모드의 저장소: 통계·연습 설정(practice.json), 보관함(practice-library.json)
 // 위치: ~/Library/Application Support/iamWriter/. 새 파일이 없을 때만 typingEng 의 옛 파일(~/.typing_eng*.json)을 읽는다.
 // 옛 파일은 읽기만 하고 고치거나 지우지 않는다(백업).
-use crate::practice::claude::{Engine, Line};
+use crate::practice::claude::{Ai, Engine, Line};
 use crate::practice::youtube::Chunk;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
@@ -78,9 +78,12 @@ pub struct Stats {
     pub en_font: Option<String>,
     #[serde(default)]
     pub ko_font: Option<String>,
-    /// 설정: 문장 생성·정리·첨삭에 쓸 CLI
+    /// 설정: 문장 생성·정리·첨삭에 쓸 엔진
     #[serde(default)]
     pub engine: Engine,
+    /// 설정: 엔진마다 고른 모델. 없으면 엔진의 기본 모델
+    #[serde(default)]
+    pub models: HashMap<Engine, String>,
     /// 첨삭 오류 유형별 누적 횟수 (Kind::key → 횟수). 처음 쓴 글만 센다.
     #[serde(default)]
     pub error_kinds: HashMap<String, u32>,
@@ -92,6 +95,10 @@ impl Stats {
     }
     pub fn save(&self) {
         save(STATS, self)
+    }
+    /// 지금 고른 엔진과 모델
+    pub fn ai(&self) -> Ai {
+        self.engine.with_model(self.models.get(&self.engine))
     }
 }
 

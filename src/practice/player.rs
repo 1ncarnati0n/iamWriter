@@ -50,7 +50,7 @@ impl Player {
             // 연결마다 스레드 — 브라우저가 미리 열어 두고 요청을 안 보내는 소켓이 다른 요청을 막지 않게
             for stream in listener.incoming().flatten() {
                 let shared = shared.clone();
-                std::thread::spawn(move || serve(stream, &shared));
+                std::thread::spawn(move || serve(stream, &shared, port));
             }
         });
         Ok(Self { port, cmd })
@@ -90,7 +90,18 @@ impl Player {
     }
 }
 
-fn serve(mut s: TcpStream, cmd: &Mutex<Cmd>) -> std::io::Result<()> {
+/// Host 헤더가 이 서버(127.0.0.1 · localhost + 포트)인지.
+/// DNS 리바인딩 막기: 악성 사이트가 자기 도메인을 127.0.0.1 로 돌려도 Host 는 그 도메인이라 거절된다.
+fn host_ok(req: &str, port: u16) -> bool {
+    req.lines()
+        .find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.trim().eq_ignore_ascii_case("host").then(|| v.trim())
+        })
+        .is_some_and(|h| h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}"))
+}
+
+fn serve(mut s: TcpStream, cmd: &Mutex<Cmd>, port: u16) -> std::io::Result<()> {
     s.set_read_timeout(Some(Duration::from_secs(1)))?;
     // 헤더 끝(빈 줄)까지 읽는다. 덜 읽고 닫으면 상대가 연결 리셋을 받는다.
     let mut buf = Vec::new();
@@ -103,6 +114,12 @@ fn serve(mut s: TcpStream, cmd: &Mutex<Cmd>) -> std::io::Result<()> {
         buf.extend_from_slice(&chunk[..n]);
     }
     let req = String::from_utf8_lossy(&buf);
+    if !host_ok(&req, port) {
+        return write!(
+            s,
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+    }
     let path = req.split_whitespace().nth(1).unwrap_or("/");
     let (ctype, body) = if path.starts_with("/cmd") {
         let c = cmd.lock().unwrap();
@@ -126,8 +143,12 @@ mod tests {
     use super::*;
 
     fn get(port: u16, path: &str) -> String {
+        get_as(port, path, &format!("127.0.0.1:{port}"))
+    }
+
+    fn get_as(port: u16, path: &str, host: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        write!(s, "GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n").unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).unwrap();
         out
@@ -160,5 +181,15 @@ mod tests {
         assert_eq!(body["subs_ver"], 1);
         let r = get(p.port, "/subs");
         assert!(r.contains("안녕."), "{r}");
+        assert!(get_as(p.port, "/subs", &format!("localhost:{}", p.port)).contains("안녕."));
+
+        // 다른 Host(DNS 리바인딩)는 거절
+        for host in ["evil.example:38917", "127.0.0.1", "x"] {
+            let r = get_as(p.port, "/subs", host);
+            assert!(
+                r.starts_with("HTTP/1.1 403") && !r.contains("안녕."),
+                "{host}: {r}"
+            );
+        }
     }
 }
